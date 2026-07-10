@@ -34,6 +34,8 @@ sequenceDiagram
 
 JSONL 是唯一的 append-only 时间线。Markdown timeline、index 和 sequence diagram 都是可重新生成的视图。不可变 notes snapshot、bundle、GPT Pro turn 和 Codex verdict 通过仓库相对路径与 SHA-256 绑定。
 
+自动取证会先补齐可以确定的本地依赖闭包，再增加广度；显式取证只要漏掉任何安全的请求文件就会失败，包括现代 Node 的 `.mjs`/`.cjs`/`.mts`/`.cts`。浏览器提交前会校验精确模型与附件，thread verifier 会检查父链、artifact 哈希和 bundle 哈希。
+
 构建 bundle 只是本地中间步骤，不进入任务时间线。真正发送的 bundle 会在对应 `gpt-exchange` 中记录，因此 smoke test 和废弃草稿不会污染主线。
 
 完整状态契约和命令见 [bridge_protocol.md](codex-pro-bridge-skills/.agents/skills/gpt-pro-question-window/references/bridge_protocol.md)。
@@ -43,6 +45,8 @@ JSONL 是唯一的 append-only 时间线。Markdown timeline、index 和 sequenc
 第一轮可以发送聚焦代码、配置、文档和结果。后续通常只发送最新 Codex notes 和精简事件窗口；只有文件变化或 GPT Pro 必须重新检查实现时才补文件。
 
 GPT Pro 完成回答后先立即保存原文；Codex 的本地验证稍后单独保存成 verdict。不要修改原始回答，让后续结论看起来像当时就存在。
+
+上传时使用 ChatGPT 可见的附件入口，不要直接点击隐藏 file input。必须核对精确模型标签（`Pro` 与 `极高` 不等价），只提交一次；只要生成状态仍然可见就继续等待。保存原始回答时要如实记录 mismatch 或 unverified 状态。
 
 ## 安装
 
@@ -95,10 +99,12 @@ Keep one bridge thread, send only scoped evidence, and do not act on unverified 
 
 - 默认只发送仓库内文件；外部文件必须显式确认，并使用匿名 archive name。
 - 缺失 include、artifact 覆盖、session 改绑和高置信度 secret 模式都会直接失败。
+- 自动模式必须保持依赖闭包完整；显式证据被过滤或超过预算时直接失败。
 - 不上传 env、凭证、cookie、key、数据库、原始私有数据或无关产物。
 - 上传 manifest 只写安全 repo label，不暴露本地绝对路径。
 - GPT Pro 网页步骤使用已登录 Chrome；Codex 扩展必须已安装、启用，并保持 **Allow access to file URLs（允许访问文件网址）** 开启。Computer Use 只处理 Chrome 无法控制的 UI 边界。
 - 遇到登录、密码、2FA、CAPTCHA、rate limit、abuse warning 或账号安全提示时停止。
+- 每次 follow-up 和最终交付前运行 thread verifier。
 - 除非用户明确决定，否则不要公开 `.codex/` bridge 产物。
 
 ## 验证

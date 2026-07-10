@@ -67,19 +67,29 @@ def validate_web_url(value: str) -> str:
     parsed = urlparse(value)
     if parsed.scheme != "https" or not parsed.netloc:
         raise BridgeError("GPT Pro conversation URL must be an https URL")
+    hostname = (parsed.hostname or "").lower()
+    allowed = hostname in {"chatgpt.com", "chat.openai.com"} or hostname.endswith(
+        (".chatgpt.com", ".chat.openai.com")
+    )
+    if not allowed:
+        raise BridgeError("GPT Pro URL must point to a ChatGPT conversation")
     return value
 
 
-def validate_timestamp(value: str) -> str:
+def validate_timestamp(value: str, flag: str, *, default_now: bool = False) -> str:
     if not value:
-        return now_iso()
+        return now_iso() if default_now else ""
     try:
         parsed = dt.datetime.fromisoformat(value)
     except ValueError as exc:
-        raise BridgeError("--asked-at must be an ISO-8601 timestamp") from exc
+        raise BridgeError(f"{flag} must be an ISO-8601 timestamp") from exc
     if parsed.tzinfo is None:
-        raise BridgeError("--asked-at must include a timezone offset")
+        raise BridgeError(f"{flag} must include a timezone offset")
     return value
+
+
+def timestamp_value(value: str) -> dt.datetime | None:
+    return dt.datetime.fromisoformat(value) if value else None
 
 
 def build_turn(
@@ -94,7 +104,16 @@ def build_turn(
     codex_notes: str,
     bundle_path: str,
     bundle_sha256: str,
-    asked_at: str,
+    submitted_at: str,
+    generation_observed_at: str,
+    response_completed_at: str,
+    response_wait_seconds: int | None,
+    requested_model: str,
+    selected_ui_label: str,
+    model_verification: str,
+    attachment_name: str,
+    attachment_verification: str,
+    upload_control: str,
     saved_at: str,
     prompt: str,
     answer: str,
@@ -116,7 +135,16 @@ def build_turn(
             f"- Bundle: {bundle_path or '-'}",
             f"- Bundle SHA-256: {bundle_sha256 or '-'}",
             f"- Capture Fingerprint: {capture_fingerprint}",
-            f"- Asked at: {asked_at}",
+            f"- Requested Model: {requested_model or '-'}",
+            f"- Selected UI Label: {selected_ui_label or '-'}",
+            f"- Model Verification: {model_verification}",
+            f"- Attachment Name: {attachment_name or '-'}",
+            f"- Attachment Verification: {attachment_verification}",
+            f"- Upload Control: {upload_control or '-'}",
+            f"- Submitted at: {submitted_at}",
+            f"- Generation observed at: {generation_observed_at or '-'}",
+            f"- Response completed at: {response_completed_at or '-'}",
+            f"- Response wait seconds: {response_wait_seconds if response_wait_seconds is not None else '-'}",
             f"- Captured at: {saved_at}",
             "",
             "## Prompt",
@@ -157,7 +185,19 @@ def main() -> int:
     parser.add_argument("--purpose", default="")
     parser.add_argument("--turn-title", default="")
     parser.add_argument("--bundle", default="", help="Existing bundle under the repository root that was actually sent.")
-    parser.add_argument("--asked-at", default="", help="ISO-8601 timestamp with timezone.")
+    parser.add_argument(
+        "--asked-at",
+        "--submitted-at",
+        dest="submitted_at",
+        default="",
+        help="Observed submission time as ISO-8601 with timezone.",
+    )
+    parser.add_argument("--generation-observed-at", default="", help="First observed generating state.")
+    parser.add_argument("--response-completed-at", default="", help="Observed completed response time.")
+    parser.add_argument("--requested-model", default="", help="Exact model label required by the task.")
+    parser.add_argument("--selected-ui-label", default="", help="Exact selected model label visible before submission.")
+    parser.add_argument("--attachment-name", default="", help="Attachment name visible in the composer before submission.")
+    parser.add_argument("--upload-control", default="", help="Successful semantic upload route, for example visible-menu.")
     parser.add_argument("--prompt", default="")
     parser.add_argument("--prompt-file", default="")
     parser.add_argument("--answer", default="")
@@ -190,8 +230,39 @@ def main() -> int:
             raise BridgeError("Both prompt and full GPT Pro answer are required")
         if decision_trail and not verification:
             raise BridgeError("An immediate decision trail requires Codex verification")
-        asked_at = validate_timestamp(args.asked_at)
+        submitted_at = validate_timestamp(
+            args.submitted_at, "--submitted-at", default_now=True
+        )
+        generation_observed_at = validate_timestamp(
+            args.generation_observed_at, "--generation-observed-at"
+        )
+        response_completed_at = validate_timestamp(
+            args.response_completed_at, "--response-completed-at"
+        )
         saved_at = now_iso()
+        submitted_value = timestamp_value(submitted_at)
+        generation_value = timestamp_value(generation_observed_at)
+        completed_value = timestamp_value(response_completed_at)
+        if generation_value and submitted_value and generation_value < submitted_value:
+            raise BridgeError("--generation-observed-at cannot precede --submitted-at")
+        if completed_value and submitted_value and completed_value < submitted_value:
+            raise BridgeError("--response-completed-at cannot precede --submitted-at")
+        if completed_value and generation_value and completed_value < generation_value:
+            raise BridgeError("--response-completed-at cannot precede --generation-observed-at")
+        response_wait_seconds = (
+            int((completed_value - submitted_value).total_seconds())
+            if completed_value and submitted_value
+            else None
+        )
+        requested_model = args.requested_model.strip()
+        selected_ui_label = args.selected_ui_label.strip()
+        model_verification = (
+            "verified"
+            if requested_model and selected_ui_label and requested_model == selected_ui_label
+            else "mismatch"
+            if requested_model and selected_ui_label
+            else "unverified"
+        )
 
         bridge_dir = bridge_root(repo)
         codex_meta = parse_metadata(
@@ -245,6 +316,16 @@ def main() -> int:
                 raise BridgeError("--bundle must point to an existing file")
             bundle_path = repo_relative(bundle, repo)
             bundle_sha256 = file_sha256(bundle)
+        attachment_name = args.attachment_name.strip()
+        attachment_verification = (
+            "verified"
+            if bundle_path and attachment_name == Path(bundle_path).name
+            else "mismatch"
+            if bundle_path and attachment_name
+            else "not-required"
+            if not bundle_path
+            else "unverified"
+        )
 
         title = one_line(args.turn_title or args.web_title or args.purpose or gpt_session_id, 120)
         capture_fingerprint = hashlib.sha256(
@@ -256,6 +337,15 @@ def main() -> int:
                     "prompt": prompt,
                     "answer": answer,
                     "bundle_sha256": bundle_sha256,
+                    "requested_model": requested_model,
+                    "selected_ui_label": selected_ui_label,
+                    "model_verification": model_verification,
+                    "attachment_name": attachment_name,
+                    "attachment_verification": attachment_verification,
+                    "upload_control": args.upload_control.strip(),
+                    "submitted_at": submitted_at,
+                    "generation_observed_at": generation_observed_at,
+                    "response_completed_at": response_completed_at,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -290,7 +380,16 @@ def main() -> int:
                         codex_notes=codex_notes,
                         bundle_path=bundle_path,
                         bundle_sha256=bundle_sha256,
-                        asked_at=asked_at,
+                        submitted_at=submitted_at,
+                        generation_observed_at=generation_observed_at,
+                        response_completed_at=response_completed_at,
+                        response_wait_seconds=response_wait_seconds,
+                        requested_model=requested_model,
+                        selected_ui_label=selected_ui_label,
+                        model_verification=model_verification,
+                        attachment_name=attachment_name,
+                        attachment_verification=attachment_verification,
+                        upload_control=args.upload_control.strip(),
                         saved_at=saved_at,
                         prompt=prompt,
                         answer=answer,
@@ -353,6 +452,16 @@ def main() -> int:
                 "bundle": bundle_path,
                 "bundle_sha256": bundle_sha256,
                 "web_title": args.web_title or previous.get("web_title", "") or title,
+                "requested_model": requested_model,
+                "selected_ui_label": selected_ui_label,
+                "model_verification": model_verification,
+                "attachment_name": attachment_name,
+                "attachment_verification": attachment_verification,
+                "upload_control": args.upload_control.strip(),
+                "submitted_at": submitted_at,
+                "generation_observed_at": generation_observed_at,
+                "response_completed_at": response_completed_at,
+                "response_wait_seconds": response_wait_seconds,
             },
             dedupe_key=f"gpt-exchange:{capture_fingerprint}",
             occurred_at=saved_at,

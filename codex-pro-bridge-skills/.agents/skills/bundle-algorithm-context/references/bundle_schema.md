@@ -35,6 +35,10 @@ Selection priority:
 - Codex session notes.
 - Bridge thread timeline.
 - Current round summaries and decisions.
+- Definitions named in the question.
+- Definitely-local direct and transitive dependencies of admitted source files.
+- Matching tests, direct callers, and boundary partners.
+- Runtime or compiled counterparts when they are the executed form.
 - Changed files related to the task.
 - Docs explaining the method.
 - Data construction / label construction.
@@ -53,4 +57,6 @@ Red flags:
 - Env files, secrets, cookies, keys, databases, raw private data, and large artifacts.
 - GPT Pro is asked to judge without seeing metrics or configs.
 - A requested include is missing, resolves outside the repository without explicit approval, or is silently omitted.
+- A broad auto bundle reaches its file budget before closing local dependencies.
+- A manifest lists many files but gives no selection reason or unresolved-dependency status.
 - The manifest requests an algorithm-review schema for a non-algorithm mode.

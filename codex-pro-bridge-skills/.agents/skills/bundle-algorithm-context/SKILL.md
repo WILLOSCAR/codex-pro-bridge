@@ -15,14 +15,14 @@ Before writing bridge state, read the canonical protocol at [../gpt-pro-question
 2. Inspect repository status, changed and untracked files, relevant architecture/docs, and the user's explicit focus paths.
 3. Create an immutable Codex notes snapshot with `scripts/prepare_codex_session_notes.py`.
 4. Choose repository context:
-   - `auto` for the first evidence-heavy round.
-   - `explicit` for follow-ups; name only changed or newly relevant files.
-   - `none` for reasoning-only follow-ups.
+   - `auto` for the first evidence-heavy round. Pass important `--include` paths as required focus seeds; the builder closes definitely-local dependencies before adding breadth.
+   - `explicit` for follow-ups; name every required file. Safe requested files such as `.mjs` must appear in the manifest or the build fails.
+   - `none` for reasoning-only follow-ups; `--max-files 0` is valid.
 5. Run `scripts/build_algorithm_bundle.py`, normally with `--format zip`.
-6. Open the manifest and verify every supplied and omitted input, repository label, mode-specific output contract, context budget, and safety warning.
+6. Open the manifest and verify every supplied and omitted input, selection reason, dependency closure, repository label, mode-specific output contract, context budget, and safety warning.
 7. Upload only after the manifest matches the intended evidence scope.
 
-Completion criterion: the artifact is new and immutable, its zip integrity check passes, no absolute local repository path appears in the manifest, every requested include is accounted for, and GPT Pro can distinguish supplied evidence from missing evidence.
+Completion criterion: the artifact is new and immutable, its zip integrity check passes, no absolute local repository path appears in the manifest, every requested include is present or the build failed, the auto dependency closure is complete, and GPT Pro can distinguish supplied evidence from missing evidence.
 
 ## Selection rules
 
@@ -30,7 +30,9 @@ Prioritize the problem statement, current notes, changed implementation, configs
 
 Exclude env files, credentials, cookies, keys, databases, raw private data, vendor trees, generated artifacts, large binaries, and unrelated files. Do not rewrite ordinary source contents. Fail on high-confidence secret-like content unless the exact files have been manually reviewed and explicitly allowed.
 
-Reject missing explicit includes and paths outside the repository by default. Use `--allow-external-include` only after confirming every external file; archive names remain anonymized.
+Reject missing, filtered, or over-budget explicit includes and paths outside the repository by default. Use `--allow-incomplete-includes` only after inspecting and accepting every recorded evidence gap. Use `--allow-external-include` only after confirming every external file; archive names remain anonymized.
+
+Do not use file count as a completeness signal. Selection priority is: explicit focus, question-named definitions, definitely-local dependencies, matching tests and boundary partners, runtime/compiled counterparts, relevant changed files, then general repository context. If a required closure exceeds the budget, increase the reviewed budget or narrow the focus; do not upload a silently truncated closure. Use `--allow-incomplete-auto-context` only after inspecting every unresolved local dependency and accepting the evidence gap.
 
 ## Multi-round policy
 

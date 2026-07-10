@@ -527,10 +527,21 @@ def compact_thread_context(
             lines.append(
                 f"### {start + offset:03d} · {event.get('event_type')} · {event.get('occurred_at')}"
             )
+            lines.append(f"- Event ID: `{event.get('event_id') or '-'}`")
+            lines.append(f"- Parent: `{event.get('parent_event_id') or '-'}`")
             lines.append(f"- Summary: {_event_summary(event)}")
             artifact = event.get("artifact")
             if artifact:
                 lines.append(f"- Artifact: {_format_value(artifact)}")
+            data = event.get("data") if isinstance(event.get("data"), Mapping) else {}
+            for key in (
+                "bundle_sha256",
+                "model_verification",
+                "requested_model",
+                "selected_ui_label",
+            ):
+                if data.get(key) not in (None, ""):
+                    lines.append(f"- {key.replace('_', ' ').title()}: {_format_value(data[key])}")
             lines.append("")
         content = "\n".join(lines).strip()
         if len(content) <= max_chars:
@@ -538,6 +549,139 @@ def compact_thread_context(
         selected = selected[1:]
         omitted += 1
     return "_Bridge thread exists, but its compact view exceeded the configured budget._"
+
+
+def verify_thread_integrity(
+    repo: Path,
+    thread_id: str,
+    *,
+    require_complete_rounds: bool = False,
+) -> Dict[str, Any]:
+    """Verify ledger links, artifact digests, bundle digests, and round ordering."""
+    repo = repo.resolve()
+    thread_id = validate_id(thread_id, "bridge thread id")
+    events = load_events(bridge_root(repo), thread_id)
+    if not events:
+        raise BridgeError(f"Bridge thread has no events: {thread_id}")
+
+    event_ids: set[str] = set()
+    dedupe_keys: set[str] = set()
+    expected_parent = ""
+    round_has_snapshot = False
+    pending_exchange = False
+    complete_rounds = 0
+    artifact_count = 0
+    bundle_count = 0
+
+    for index, event in enumerate(events, start=1):
+        prefix = f"event {index}"
+        event_type = str(event.get("event_type", ""))
+        expected_actor = {
+            "codex-snapshot": "codex",
+            "gpt-exchange": "gpt-pro",
+            "codex-verdict": "codex",
+        }.get(event_type)
+        if expected_actor and event.get("actor") != expected_actor:
+            raise BridgeError(
+                f"{prefix}: actor mismatch for {event_type}; expected {expected_actor}"
+            )
+        if event.get("schema_version") != SCHEMA_VERSION:
+            raise BridgeError(f"{prefix}: unsupported schema version")
+        if event.get("thread_id") != thread_id:
+            raise BridgeError(f"{prefix}: thread id mismatch")
+        event_id = str(event.get("event_id", ""))
+        if not event_id or event_id in event_ids:
+            raise BridgeError(f"{prefix}: missing or duplicate event id")
+        event_ids.add(event_id)
+        if str(event.get("parent_event_id", "")) != expected_parent:
+            raise BridgeError(
+                f"{prefix}: parent chain mismatch; expected {expected_parent or '<root>'}"
+            )
+        expected_parent = event_id
+        occurred_at = str(event.get("occurred_at", ""))
+        try:
+            parsed_time = dt.datetime.fromisoformat(occurred_at)
+        except ValueError as exc:
+            raise BridgeError(f"{prefix}: invalid occurred_at timestamp") from exc
+        if parsed_time.tzinfo is None:
+            raise BridgeError(f"{prefix}: occurred_at must include a timezone")
+        dedupe_key = str(event.get("dedupe_key", ""))
+        if dedupe_key:
+            if dedupe_key in dedupe_keys:
+                raise BridgeError(f"{prefix}: duplicate dedupe key")
+            dedupe_keys.add(dedupe_key)
+
+        artifact = event.get("artifact")
+        if artifact:
+            if not isinstance(artifact, Mapping):
+                raise BridgeError(f"{prefix}: artifact must be an object")
+            artifact_path = str(artifact.get("path", ""))
+            expected_sha = str(artifact.get("sha256", ""))
+            if not artifact.get("kind") or not artifact_path or not re.fullmatch(
+                r"[0-9a-f]{64}", expected_sha
+            ):
+                raise BridgeError(f"{prefix}: artifact kind, path, and SHA-256 are required")
+            expected_kind = {
+                "codex-snapshot": "codex-notes",
+                "gpt-exchange": "gpt-pro-turn",
+                "codex-verdict": "codex-verdict",
+            }.get(event_type)
+            if expected_kind and artifact.get("kind") != expected_kind:
+                raise BridgeError(
+                    f"{prefix}: artifact kind mismatch for {event_type}; expected {expected_kind}"
+                )
+            try:
+                resolved_artifact = resolve_repo_path(artifact_path, repo)
+            except BridgeError as exc:
+                raise BridgeError(f"{prefix}: artifact path is missing or unsafe: {artifact_path}") from exc
+            if not resolved_artifact.is_file():
+                raise BridgeError(f"{prefix}: artifact is not a file: {artifact_path}")
+            if file_sha256(resolved_artifact) != expected_sha:
+                raise BridgeError(f"{prefix}: artifact hash mismatch: {artifact_path}")
+            artifact_count += 1
+
+        data = event.get("data") if isinstance(event.get("data"), Mapping) else {}
+        bundle_path = str(data.get("bundle", ""))
+        bundle_sha = str(data.get("bundle_sha256", ""))
+        if bundle_path:
+            if not re.fullmatch(r"[0-9a-f]{64}", bundle_sha):
+                raise BridgeError(f"{prefix}: bundle SHA-256 is missing or invalid")
+            try:
+                bundle = resolve_repo_path(bundle_path, repo)
+            except BridgeError as exc:
+                raise BridgeError(f"{prefix}: bundle path is missing or unsafe: {bundle_path}") from exc
+            if not bundle.is_file() or file_sha256(bundle) != bundle_sha:
+                raise BridgeError(f"{prefix}: bundle hash mismatch: {bundle_path}")
+            bundle_count += 1
+
+        if event_type == "codex-snapshot":
+            if pending_exchange:
+                raise BridgeError(f"{prefix}: snapshot cannot precede the pending Codex verdict")
+            round_has_snapshot = True
+        elif event_type == "gpt-exchange":
+            if not round_has_snapshot or pending_exchange:
+                raise BridgeError(f"{prefix}: GPT exchange has no available Codex snapshot")
+            pending_exchange = True
+        elif event_type == "codex-verdict":
+            if not pending_exchange:
+                raise BridgeError(f"{prefix}: Codex verdict has no pending GPT exchange")
+            pending_exchange = False
+            round_has_snapshot = False
+            complete_rounds += 1
+        elif not event_type.startswith("legacy-"):
+            raise BridgeError(f"{prefix}: unsupported event type {event_type!r}")
+
+    if require_complete_rounds and (pending_exchange or round_has_snapshot):
+        raise BridgeError("Bridge thread ends with an incomplete round")
+    return {
+        "valid": True,
+        "thread_id": thread_id,
+        "event_count": len(events),
+        "complete_rounds": complete_rounds,
+        "artifact_count": artifact_count,
+        "bundle_count": bundle_count,
+        "round_complete": not pending_exchange and not round_has_snapshot,
+    }
 
 
 def write_session_index(sessions_dir: Path, *, kind: str) -> None:
@@ -625,11 +769,31 @@ def record_codex_verdict(
             f"GPT Pro session {gpt_pro_session_id} is linked to Codex session "
             f"{session_meta['codex_session_id']}, not {codex_session_id}"
         )
+    expected_session_dir = (
+        bridge_root(repo) / "gpt-pro-sessions" / gpt_pro_session_id
+    ).resolve()
+    turn_rel = repo_relative(turn_path, repo)
+    if turn_path.parent != expected_session_dir:
+        raise BridgeError("Verdict turn must stay inside the bound GPT Pro session")
+    matching_exchange = next(
+        (
+            event
+            for event in load_events(bridge_root(repo), thread_id)
+            if event.get("event_type") == "gpt-exchange"
+            and isinstance(event.get("artifact"), Mapping)
+            and event["artifact"].get("path") == turn_rel
+            and event.get("gpt_pro_session_id") == gpt_pro_session_id
+            and event.get("codex_session_id") == codex_session_id
+        ),
+        None,
+    )
+    if matching_exchange is None:
+        raise BridgeError("Verdict turn is not a captured exchange in the bound GPT Pro session")
     saved_at = occurred_at or now_iso()
     payload_fingerprint = hashlib.sha256(
         json.dumps(
             {
-                "turn": repo_relative(turn_path, repo),
+                "turn": turn_rel,
                 "summary": summary,
                 "verification": verification,
                 "decision_trail": decision_trail,
@@ -701,7 +865,7 @@ def record_codex_verdict(
             "verification": _short(verification),
             "next_question": _short(next_question),
         },
-        dedupe_key=f"codex-verdict:{repo_relative(turn_path, repo)}:{payload_fingerprint}",
+        dedupe_key=f"codex-verdict:{turn_rel}:{payload_fingerprint}",
         occurred_at=saved_at,
     )
     return verdict_path

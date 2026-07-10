@@ -67,12 +67,38 @@ def validate_skill(skill_dir: Path) -> None:
             error(f"{script}: script is not named in SKILL.md")
 
 
+def require_phrases(path: Path, phrases: list[str]) -> None:
+    text = path.read_text(encoding="utf-8")
+    for phrase in phrases:
+        if phrase not in text:
+            error(f"{path}: missing required workflow invariant: {phrase}")
+
+
 def main() -> int:
     skill_dirs = sorted(
         path for path in SKILLS.iterdir() if path.is_dir() and not path.name.startswith(".")
     )
     for skill_dir in skill_dirs:
         validate_skill(skill_dir)
+    require_phrases(
+        SKILLS / "gpt-pro-question-window" / "SKILL.md",
+        [
+            "scripts/check_browser_preflight.py",
+            "Never directly click a hidden input",
+            "scripts/verify_bridge_thread.py",
+            "model state as",
+            "never resend while generation is still active",
+        ],
+    )
+    require_phrases(
+        SKILLS / "bundle-algorithm-context" / "SKILL.md",
+        [
+            "dependency closure",
+            ".mjs",
+            "--allow-incomplete-auto-context",
+            "--max-files 0",
+        ],
+    )
     for script in sorted(SKILLS.rglob("*.py")):
         try:
             ast.parse(script.read_text(encoding="utf-8"), filename=str(script))

@@ -34,12 +34,14 @@ from bridge_store import (  # noqa: E402
     timestamp_slug,
     validate_id,
 )
+from evidence_graph import dependency_closure  # noqa: E402
 
 
 DEFAULT_INCLUDE_EXTS = {
     ".py", ".ipynb", ".md", ".txt", ".rst", ".yaml", ".yml", ".json", ".jsonl",
     ".toml", ".ini", ".cfg", ".sh", ".bash", ".zsh", ".sql", ".ts", ".tsx",
-    ".js", ".jsx", ".html", ".css", ".scss", ".less", ".go", ".rs", ".java",
+    ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".html", ".css", ".scss",
+    ".less", ".go", ".rs", ".java",
     ".scala", ".kt", ".cpp", ".cc", ".c", ".h", ".hpp", ".cu", ".m", ".mm",
     ".swift", ".r", ".jl", ".log",
 }
@@ -125,7 +127,8 @@ def run_text(command: Sequence[str], cwd: Path) -> str:
         result = subprocess.run(
             list(command), cwd=str(cwd), text=True, capture_output=True, check=True
         )
-        return result.stdout.strip()
+        # Preserve the leading status column used by `git status --short`.
+        return result.stdout.rstrip()
     except (OSError, subprocess.CalledProcessError):
         return ""
 
@@ -145,6 +148,24 @@ def git_files(root: Path) -> List[Path]:
     except (OSError, subprocess.CalledProcessError):
         return []
     return [root / os.fsdecode(item) for item in result.stdout.split(b"\0") if item]
+
+
+def git_changed_paths(root: Path) -> set[str]:
+    """Return staged, unstaged, and untracked paths without porcelain quoting loss."""
+    commands = []
+    if run_text(["git", "rev-parse", "--verify", "HEAD"], root):
+        commands.append(["git", "diff", "--name-only", "-z", "HEAD", "--"])
+    else:
+        commands.append(["git", "ls-files", "-z", "--cached"])
+    commands.append(["git", "ls-files", "-z", "--others", "--exclude-standard"])
+    changed: set[str] = set()
+    for command in commands:
+        try:
+            result = subprocess.run(command, cwd=str(root), capture_output=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        changed.update(os.fsdecode(item) for item in result.stdout.split(b"\0") if item)
+    return changed
 
 
 def walk_files(root: Path) -> List[Path]:
@@ -227,12 +248,89 @@ def score_file(path: Path, root: Path, keywords: Iterable[str], changed: set[str
     }:
         score += 8
     score += sum(3 for hint in ALGORITHM_HINTS if hint in relative)
-    score += sum(4 for keyword in keywords if keyword and keyword in relative)
+    # A path named by the goal/question outranks generic changed-file breadth.
+    score += sum(16 for keyword in keywords if keyword and keyword in relative)
     if path.suffix.lower() in {".yaml", ".yml", ".toml", ".json", ".ini", ".cfg"}:
         score += 2
     if path.suffix.lower() in {".md", ".rst", ".txt"}:
         score += 2
     return score
+
+
+def select_auto_evidence(
+    *,
+    ranked: Sequence[Path],
+    required: Sequence[Path],
+    candidates: Sequence[Path],
+    root: Path,
+    max_files: int,
+    skip_files_over_bytes: int,
+    allow_incomplete: bool,
+) -> Tuple[List[Path], dict[Path, str], List[Tuple[str, str]]]:
+    """Select relevance seeds while keeping every admitted dependency closure whole."""
+    eligible = [
+        path.resolve()
+        for path in candidates
+        if skip_files_over_bytes <= 0 or file_size(path) <= skip_files_over_bytes
+    ]
+    eligible_set = set(eligible)
+    required_set = {path.resolve() for path in required}
+    seed_order = list(
+        dict.fromkeys(
+            [path.resolve() for path in required]
+            + [path.resolve() for path in ranked if path.resolve() in eligible_set]
+        )
+    )
+    selected: List[Path] = []
+    selected_set: set[Path] = set()
+    reasons: dict[Path, str] = {}
+    omitted: List[Tuple[str, str]] = []
+
+    for seed in seed_order:
+        if seed in selected_set:
+            continue
+        closure = dependency_closure([seed], eligible, root)
+        if closure.unresolved and not allow_incomplete:
+            raise BridgeError(
+                "Auto dependency closure is incomplete for "
+                f"{display_path(seed, root)}: " + "; ".join(closure.unresolved)
+            )
+        for item in closure.unresolved:
+            omitted.append((item, "unresolved local dependency; explicitly allowed"))
+        additions = [path for path in closure.paths if path not in selected_set]
+        if len(selected) + len(additions) > max_files:
+            message = (
+                f"dependency closure needs {len(additions)} more files with "
+                f"{max_files - len(selected)} slots remaining"
+            )
+            if seed in required_set or not selected:
+                raise BridgeError(
+                    f"Auto dependency closure for {display_path(seed, root)} exceeds --max-files: "
+                    + message
+                )
+            omitted.append((display_path(seed, root), message))
+            continue
+        for path in additions:
+            selected.append(path)
+            selected_set.add(path)
+            if path == seed:
+                reasons[path] = (
+                    "explicit auto focus"
+                    if seed in required_set
+                    else "relevance-ranked focus"
+                )
+            else:
+                reasons[path] = closure.reasons[path]
+        if len(selected) == max_files:
+            break
+
+    for path in ranked:
+        resolved = path.resolve()
+        if resolved not in eligible_set:
+            omitted.append(
+                (display_path(path, root), f"over size threshold ({file_size(path)} bytes)")
+            )
+    return selected, reasons, omitted
 
 
 def _expand_item(item: str, root: Path) -> List[Path]:
@@ -363,7 +461,18 @@ def main() -> int:
     parser.add_argument("--repo-context", default="auto", choices=["auto", "explicit", "none"])
     parser.add_argument("--include", nargs="*", default=[], help="Explicit repository files, directories, or globs.")
     parser.add_argument("--allow-external-include", action="store_true", help="Allow explicitly requested files outside the repo; archive paths remain anonymized.")
-    parser.add_argument("--allow-missing-includes", action="store_true", help="Continue when an include does not match; the manifest records it.")
+    parser.add_argument(
+        "--allow-missing-includes",
+        "--allow-incomplete-includes",
+        dest="allow_missing_includes",
+        action="store_true",
+        help="Continue when an explicit include is missing or filtered; the manifest records it.",
+    )
+    parser.add_argument(
+        "--allow-incomplete-auto-context",
+        action="store_true",
+        help="Continue when a definitely-local dependency cannot be resolved; the manifest records it.",
+    )
     parser.add_argument("--allow-secret-like-content", action="store_true", help="Continue after high-confidence secret-pattern detection. Does not rewrite content.")
     parser.add_argument("--max-files", type=int, default=24)
     parser.add_argument("--max-file-bytes", type=int, default=60_000)
@@ -384,14 +493,22 @@ def main() -> int:
         root = Path(args.repo).resolve()
         if not root.is_dir():
             raise BridgeError(f"Repository root is not a directory: {root}")
+        if args.max_files < 0 or (args.max_files == 0 and args.repo_context != "none"):
+            raise BridgeError(
+                "--max-files must be positive unless --repo-context none is used"
+            )
         for name in (
-            "max_files", "max_file_bytes", "max_total_chars", "max_thread_events",
+            "max_file_bytes", "max_total_chars", "max_thread_events",
             "max_thread_chars", "skip_files_over_bytes",
         ):
             if getattr(args, name) <= 0:
                 raise BridgeError(f"--{name.replace('_', '-')} must be positive")
         if args.repo_context == "none" and args.include:
             raise BridgeError("--repo-context none cannot be combined with --include")
+        if args.repo_context == "explicit" and not args.include:
+            raise BridgeError("--repo-context explicit requires --include")
+        if args.allow_external_include and args.repo_context != "explicit":
+            raise BridgeError("--allow-external-include requires --repo-context explicit")
 
         thread_id = validate_id(args.bridge_thread_id, "bridge thread id")
         codex_session_id = validate_id(
@@ -439,15 +556,13 @@ def main() -> int:
         git = is_git_repo(root)
         status = filtered_git_status(root) if git else ""
         diff_stat = git_diff_stat(root) if git else ""
-        changed = {
-            line[3:].split(" -> ")[-1].strip()
-            for line in status.splitlines()
-            if len(line) >= 4 and line[3:].strip()
-        }
+        changed = git_changed_paths(root) if git else set()
         omitted: List[Tuple[str, str]] = [(problem, "explicitly allowed") for problem in include_problems]
+        selected_reasons: dict[Path, str] = {}
+        auto_context_status = "not-applicable"
         if args.repo_context == "none":
             selected: List[Path] = []
-        elif include_paths:
+        elif args.repo_context == "explicit":
             selected, filtered = filter_files(
                 include_paths,
                 root,
@@ -456,14 +571,18 @@ def main() -> int:
                 skip_files_over_bytes=args.skip_files_over_bytes,
                 allow_external=args.allow_external_include,
             )
+            if filtered and not args.allow_missing_includes:
+                details = "; ".join(f"{label}: {reason}" for label, reason in filtered)
+                raise BridgeError("Explicit evidence is incomplete: " + details)
             omitted.extend(filtered)
-        elif args.repo_context == "explicit":
-            selected = []
+            selected_reasons = {path.resolve(): "explicit include" for path in selected}
         else:
             all_files = git_files(root) if git else walk_files(root)
             candidates = [
                 path for path in all_files
-                if path.is_file() and is_candidate(path, root, args.include_logs)
+                if path.is_file()
+                and is_within(path, root)
+                and is_candidate(path, root, args.include_logs)
             ]
             keywords = keywords_from_text(args.goal, args.question)
             ranked = sorted(
@@ -477,15 +596,33 @@ def main() -> int:
             scored = [
                 path for path in ranked if score_file(path, root, keywords, changed) > 0
             ]
-            selected, filtered = filter_files(
-                scored,
+            required, filtered = filter_files(
+                include_paths,
                 root,
-                include_logs=args.include_logs,
+                include_logs=True,
                 max_files=args.max_files,
                 skip_files_over_bytes=args.skip_files_over_bytes,
-                allow_external=False,
+                allow_external=args.allow_external_include,
             )
+            if filtered and not args.allow_missing_includes:
+                details = "; ".join(f"{label}: {reason}" for label, reason in filtered)
+                raise BridgeError("Explicit auto focus is incomplete: " + details)
             omitted.extend(filtered)
+            selected, selected_reasons, auto_omitted = select_auto_evidence(
+                ranked=scored,
+                required=required,
+                candidates=candidates,
+                root=root,
+                max_files=args.max_files,
+                skip_files_over_bytes=args.skip_files_over_bytes,
+                allow_incomplete=args.allow_incomplete_auto_context,
+            )
+            omitted.extend(auto_omitted)
+            auto_context_status = (
+                "incomplete"
+                if any("unresolved local dependency" in reason for _, reason in auto_omitted)
+                else "complete"
+            )
 
         extra_notes, extra_problems = parse_include_paths(
             args.extra_notes, root, allow_external=False
@@ -552,6 +689,7 @@ def main() -> int:
             f"- Repository label: `{repo_label}`",
             f"- Mode: `{args.mode}`",
             f"- Repository context: `{args.repo_context}`",
+            f"- Auto dependency closure: `{auto_context_status}`",
             f"- Bridge thread id: `{thread_id}`",
             f"- Codex session id: `{codex_session_id}`",
         ]
@@ -582,7 +720,10 @@ def main() -> int:
             ]
         )
         if selected:
-            sections.extend(f"- `{archive_name(path, root)}`" for path in selected)
+            sections.extend(
+                f"- `{archive_name(path, root)}` — {selected_reasons.get(path.resolve(), 'selected evidence')}"
+                for path in selected
+            )
         else:
             sections.append("- No repository files were supplied for this round.")
         if omitted:

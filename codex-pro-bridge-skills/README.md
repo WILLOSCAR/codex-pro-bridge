@@ -36,6 +36,8 @@ codex-snapshot -> gpt-exchange -> codex-verdict
 
 Use one required `bridge-thread-id`; endpoint session IDs derive from it. JSONL is the canonical append-only ledger, while Markdown and the sequence diagram are derived views. Artifacts are immutable and linked by relative path plus SHA-256.
 
+The bundle builder includes modern Node files such as `.mjs`, keeps definitely-local dependency closures whole before adding auto-selection breadth, and fails closed on omitted explicit evidence. Browser submission uses an exact model/attachment preflight; final handoff uses a parent-and-hash ledger verifier.
+
 Read the full protocol at [.agents/skills/gpt-pro-question-window/references/bridge_protocol.md](.agents/skills/gpt-pro-question-window/references/bridge_protocol.md).
 
 ## Validate

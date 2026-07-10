@@ -34,6 +34,8 @@ for source_path in "$SRC_DIR"/* "$SRC_DIR"/.shared; do
   name="$(basename "$source_path")"
   managed+=("$name")
   cp -R "$source_path" "$STAGE_DIR/$name"
+  find "$STAGE_DIR/$name" -type d -name __pycache__ -prune -exec rm -rf {} +
+  find "$STAGE_DIR/$name" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 done
 
 for name in "${managed[@]}"; do

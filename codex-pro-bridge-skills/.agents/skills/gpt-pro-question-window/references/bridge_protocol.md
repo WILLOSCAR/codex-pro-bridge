@@ -94,6 +94,23 @@ By default the builder uses the latest immutable Codex notes snapshot recorded i
 
 Completion criterion: the manifest names the correct mode, lists every supplied file, contains no absolute local repository path, passes zip integrity checks, and is small enough to upload. Bundle creation alone does not add a task event.
 
+For `auto`, use any `--include` paths as required focus seeds, close their definitely-local source dependencies before adding breadth, and fail if the required closure exceeds `--max-files`. For `explicit`, require at least one include and fail when any requested file is filtered or omitted; `--allow-incomplete-includes` is an audited escape hatch, not a default. Modern Node evidence includes `.mjs`, `.cjs`, `.mts`, and `.cts`. For `none`, `--max-files 0` is valid.
+
+### 2.5 Browser preflight
+
+After the visible attachment chip and exact selected model label are observable, gate submission:
+
+```bash
+python3 .agents/skills/gpt-pro-question-window/scripts/check_browser_preflight.py \
+  --requested-model Pro \
+  --selected-ui-label '<exact visible label>' \
+  --bundle /absolute/path/to/bundle.zip \
+  --attachment-name '<visible filename>' \
+  --upload-control visible-menu
+```
+
+Only click Send when this command succeeds. A subscription/account label does not establish the selected model. `极高` and `Pro` are distinct labels.
+
 ### 3. Exchange capture
 
 After the answer finishes, immediately capture the raw exchange:
@@ -106,11 +123,20 @@ python3 .agents/skills/gpt-pro-question-window/scripts/save_bridge_turn.py \
   --web-title "<observed title>" \
   --purpose "<task purpose>" \
   --bundle .codex/codex-pro-bridge/bundles/<bundle>.zip \
+  --requested-model Pro \
+  --selected-ui-label '<exact visible label>' \
+  --attachment-name '<visible filename>' \
+  --upload-control visible-menu \
+  --submitted-at '<ISO-8601 with timezone>' \
+  --generation-observed-at '<ISO-8601 with timezone>' \
+  --response-completed-at '<ISO-8601 with timezone>' \
   --prompt-file /tmp/gpt-pro-prompt.md \
   --answer-file /tmp/gpt-pro-answer.md
 ```
 
-Completion criterion: a numbered immutable turn exists; its bundle digest matches the file sent; the GPT Pro session remains bound to one thread and one URL; and one `gpt-exchange` event points to the turn.
+Capture the raw answer even when the observed model is mismatched or unverified, but preserve that status and do not claim the answer came from Pro.
+
+Completion criterion: a numbered immutable turn exists; its bundle digest matches the file sent; model and attachment provenance are recorded truthfully; the GPT Pro session remains bound to one thread and one ChatGPT URL; and one `gpt-exchange` event points to the turn.
 
 ### 4. Codex verdict
 
@@ -130,6 +156,19 @@ python3 .agents/skills/gpt-pro-question-window/scripts/record_codex_verdict.py \
 
 Completion criterion: an immutable verdict artifact and one `codex-verdict` event point to the captured GPT Pro turn. Never edit the raw GPT Pro answer to add later conclusions.
 
+### 5. Verify the thread
+
+Before another round and before final handoff, verify the append-only chain and every referenced artifact:
+
+```bash
+python3 .agents/skills/gpt-pro-question-window/scripts/verify_bridge_thread.py \
+  --repo . \
+  --bridge-thread-id <thread-id> \
+  --require-complete-rounds
+```
+
+The verifier fails on broken parents, duplicate identities, unsafe or missing artifact paths, artifact or bundle hash mismatches, invalid ordering, and incomplete final rounds.
+
 ## Evidence scope
 
 - Default to repository-contained paths.
@@ -142,8 +181,8 @@ Completion criterion: an immutable verdict artifact and one `codex-verdict` even
 
 ## Context policy
 
-- `auto`: first round or implementation-heavy review.
-- `explicit`: follow-up round; include only named changed or newly relevant files.
+- `auto`: first round or implementation-heavy review. Rank focus, then keep its definitely-local dependency closure whole before adding breadth.
+- `explicit`: follow-up round; include only named changed or newly relevant files. Every requested safe file must be included unless the operator deliberately uses the incomplete-evidence override.
 - `none`: reasoning-only follow-up with notes and compact event context.
 
 Keep the full ledger local. Bundles use the latest 24 events and 20,000 characters by default. Increase either limit only when an older event is directly relevant.
@@ -154,9 +193,12 @@ Prerequisite: install and enable the Codex Chrome extension. In this environment
 
 1. Use signed-in Chrome for ChatGPT/GPT Pro.
 2. Verify the Codex extension is enabled and **Allow access to file URLs** remains on.
-3. Start the file-chooser wait before clicking the visible upload control.
+3. Start the file-chooser wait before clicking the visible attachment button and visible upload menu item. Never directly click hidden `#upload-files`.
 4. Set the absolute bundle path and verify the attachment chip.
-5. Use Computer Use only when Chrome cannot control a native or graphical UI boundary.
-6. For a dry run, remove the attachment and verify the composer is empty.
+5. Read the exact selected model label and run `check_browser_preflight.py`; do not send on mismatch.
+6. Use Computer Use only when Chrome cannot control a native or graphical UI boundary.
+7. For a dry run, remove the attachment and verify the composer is empty.
+
+While generation remains visibly active, keep waiting without resubmission. Inspect every 30–60 seconds, provide a short progress update at least once per minute, and record only timestamps actually observed. On a stalled or failed state, capture diagnostics and stop instead of duplicating the request.
 
 If `setFiles(...)` reports `Not allowed`, enable **Allow access to file URLs** for the Codex Chrome extension. Stop for CAPTCHA, rate limits, abuse warnings, unusual login, passwords, 2FA, or account-security prompts.

@@ -34,6 +34,8 @@ sequenceDiagram
 
 The canonical timeline is append-only JSONL. Markdown timelines, indexes, and the sequence diagram are derived views. Immutable snapshots, bundles, GPT Pro turns, and Codex verdicts are linked by repository-relative paths and SHA-256 digests.
 
+Auto evidence selection now preserves definitely-local dependency closures before adding breadth; explicit evidence fails closed when any requested safe file is omitted, including modern Node `.mjs`/`.cjs`/`.mts`/`.cts` files. A browser preflight gates the exact model and attachment before submission, and a thread verifier checks parent links plus artifact and bundle hashes.
+
 Bundle construction attempts are not task events. The bundle actually sent is recorded with the corresponding GPT exchange. This keeps smoke tests and abandoned drafts out of the task history.
 
 The complete state contract and commands live in [bridge_protocol.md](codex-pro-bridge-skills/.agents/skills/gpt-pro-question-window/references/bridge_protocol.md).
@@ -43,6 +45,8 @@ The complete state contract and commands live in [bridge_protocol.md](codex-pro-
 The first round may include focused code, configs, docs, and results. Follow-up rounds normally send current Codex notes and a compact recent event window. Add files again only when they changed or GPT Pro must inspect them.
 
 Capture the raw GPT Pro answer immediately. Record Codex verification later as a separate verdict; never edit the external answer to make later conclusions look contemporaneous.
+
+Use ChatGPT's visible attachment control rather than directly clicking a hidden file input. Verify the exact selected label (`Pro` is not the same as `极高`), submit once, keep waiting while generation is visibly active, and preserve mismatch or unverified model provenance when capturing the raw answer.
 
 ## Install
 
@@ -95,10 +99,12 @@ Keep one bridge thread, send only scoped evidence, and do not act on unverified 
 
 - Keep evidence inside the repository by default. External includes require explicit approval and receive anonymized archive names.
 - Reject missing includes, immutable-artifact overwrites, session rebinding, and high-confidence secret patterns.
+- Keep auto dependency closures whole and fail closed when explicit evidence is filtered or exceeds its budget.
 - Do not upload env files, credentials, cookies, keys, databases, raw private data, or unrelated artifacts.
 - Uploaded manifests use a safe repository label, never the absolute local path.
 - Use signed-in Chrome with the Codex extension installed and enabled. Keep **Allow access to file URLs** on; use Computer Use only for UI boundaries Chrome cannot control.
 - Stop for login, password, 2FA, CAPTCHA, rate-limit, abuse, or account-security prompts.
+- Run the thread verifier before a follow-up round or final handoff.
 - Never publish `.codex/` bridge artifacts unless the user explicitly chooses to do so.
 
 ## Validate
