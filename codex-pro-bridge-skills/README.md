@@ -1,44 +1,53 @@
-# Codex Pro Bridge Skills
+# Codex Pro Bridge Skills Package
 
-This package installs seven Codex skills for scoped GPT Pro review and local verification.
+This directory contains the seven managed skills, shared runtime, installers, tests, examples, and workflow documentation for Codex Pro Bridge.
+
+Start with the repository-level [English README](../README.md) or [中文说明](../README.zh-CN.md). The canonical state and CLI contract lives in [bridge_protocol.md](.agents/skills/gpt-pro-question-window/references/bridge_protocol.md).
 
 ## Install
 
-Before using browser upload:
+Before browser upload, enable the Codex Chrome extension and turn on **Allow access to file URLs** in the extension's Chrome details page.
 
-1. Install and enable the Codex Chrome extension. In this environment, use a US-region network node while downloading it from the Chrome Web Store.
-2. Open `chrome://extensions/`, open the Codex extension's **Details**, and enable **Allow access to file URLs**.
-
-The local bundle may not be attached when this permission is disabled.
+Global installation:
 
 ```bash
 ./install.sh --global
+```
+
+Repository-local installation:
+
+```bash
 ./install.sh --repo /path/to/repo
 ```
 
-The installer synchronizes only this package's managed skills and hidden shared runtime. It removes stale files inside those directories without touching unrelated skills.
+The installer replaces only the seven managed skills and `.shared`. It removes generated Python cache files and leaves unrelated skills untouched.
 
-Repository-local installation adds `.agents/` and `.codex/` to the repository's local `.git/info/exclude`.
+Repository-local installation adds `.agents/` and `.codex/` to the target repository's local `.git/info/exclude`.
 
 ## Entry points
 
-- Use `$gpt-pro-question-window` for a normal question or existing GPT Pro conversation.
-- Use `$gpt-pro-research-algorithm-reviewer` for deep algorithm or pipeline review.
-- Use `$gpt-pro-paper-brainstormer` for paper framing.
-- Use `$gpt-pro-algorithm-pipeline` for the complete loop.
-- Use `$experiment-plan-generator` and `$implementation-consistency-checker` locally when GPT Pro is unnecessary.
+| Need | Skill |
+| --- | --- |
+| Normal question or existing conversation | `$gpt-pro-question-window` |
+| Deep algorithm, pipeline, or experiment review | `$gpt-pro-research-algorithm-reviewer` |
+| Paper framing and reviewer pressure test | `$gpt-pro-paper-brainstormer` |
+| Complete external-review loop | `$gpt-pro-algorithm-pipeline` |
+| Local experiment matrix | `$experiment-plan-generator` |
+| Local implementation/result consistency check | `$implementation-consistency-checker` |
 
-Every external round follows:
+`$bundle-algorithm-context` is the evidence-package adapter used before source-backed external rounds.
+
+## Runtime contract
+
+Every completed external round is:
 
 ```text
 codex-snapshot -> gpt-exchange -> codex-verdict
 ```
 
-Use one required `bridge-thread-id`; endpoint session IDs derive from it. JSONL is the canonical append-only ledger, while Markdown and the sequence diagram are derived views. Artifacts are immutable and linked by relative path plus SHA-256.
+Use one `bridge-thread-id`. Preserve raw external answers separately from Codex verdicts. Run exact browser preflight before submission and thread verification before follow-up or handoff.
 
-The bundle builder includes modern Node files such as `.mjs`, keeps definitely-local dependency closures whole before adding auto-selection breadth, and fails closed on omitted explicit evidence. Browser submission uses an exact model/attachment preflight; final handoff uses a parent-and-hash ledger verifier.
-
-Read the full protocol at [.agents/skills/gpt-pro-question-window/references/bridge_protocol.md](.agents/skills/gpt-pro-question-window/references/bridge_protocol.md).
+See [WORKFLOW.md](docs/WORKFLOW.md) for the compact flow and [usage_prompts.md](examples/usage_prompts.md) for invocation examples.
 
 ## Validate
 
@@ -47,4 +56,4 @@ python3 -m unittest discover -s tests -v
 python3 tests/validate_skills.py
 ```
 
-No third-party Python package is required.
+The repository validation path uses only the Python standard library.
