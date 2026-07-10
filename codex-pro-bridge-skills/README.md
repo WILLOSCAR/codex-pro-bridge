@@ -1,12 +1,10 @@
 # Codex Pro Bridge Skills Package
 
-This directory contains the seven managed skills, shared runtime, installers, tests, examples, and workflow documentation for Codex Pro Bridge.
+This directory contains the managed skills, shared runtime, installers, tests, examples, and internal workflow references for Codex Pro Bridge.
 
-Start with the repository-level [English README](../README.md) or [中文说明](../README.zh-CN.md). The canonical state and CLI contract lives in [bridge_protocol.md](.agents/skills/gpt-pro-question-window/references/bridge_protocol.md).
+Start with the repository-level [English README](../README.md) or [中文说明](../README.zh-CN.md).
 
 ## Install
-
-Before browser upload, enable the Codex Chrome extension and turn on **Allow access to file URLs** in the extension's Chrome details page.
 
 Global installation:
 
@@ -20,9 +18,7 @@ Repository-local installation:
 ./install.sh --repo /path/to/repo
 ```
 
-The installer replaces only the seven managed skills and `.shared`. It removes generated Python cache files and leaves unrelated skills untouched.
-
-Repository-local installation adds `.agents/` and `.codex/` to the target repository's local `.git/info/exclude`.
+The installer replaces only the seven managed skills and `.shared`. Repository-local installation also adds `.agents/` and `.codex/` to the target repository's local `.git/info/exclude`.
 
 ## Entry points
 
@@ -35,19 +31,9 @@ Repository-local installation adds `.agents/` and `.codex/` to the target reposi
 | Local experiment matrix | `$experiment-plan-generator` |
 | Local implementation/result consistency check | `$implementation-consistency-checker` |
 
-`$bundle-algorithm-context` is the evidence-package adapter used before source-backed external rounds.
+`$bundle-algorithm-context` prepares evidence for source-backed external rounds.
 
-## Runtime contract
-
-Every completed external round is:
-
-```text
-codex-snapshot -> gpt-exchange -> codex-verdict
-```
-
-Use one `bridge-thread-id`. Preserve raw external answers separately from Codex verdicts. Run exact browser preflight before submission and thread verification before follow-up or handoff.
-
-See [WORKFLOW.md](docs/WORKFLOW.md) for the compact flow and [usage_prompts.md](examples/usage_prompts.md) for invocation examples.
+See [usage_prompts.md](examples/usage_prompts.md) for invocation examples. Operational details live in the relevant skills and the [canonical protocol](.agents/skills/gpt-pro-question-window/references/bridge_protocol.md).
 
 ## Validate
 
@@ -55,5 +41,3 @@ See [WORKFLOW.md](docs/WORKFLOW.md) for the compact flow and [usage_prompts.md](
 python3 -m unittest discover -s tests -v
 python3 tests/validate_skills.py
 ```
-
-The repository validation path uses only the Python standard library.

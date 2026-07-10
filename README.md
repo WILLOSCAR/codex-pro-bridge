@@ -2,36 +2,91 @@
 
 [中文说明](README.zh-CN.md)
 
-Codex Pro Bridge is a supervised workflow for sending scoped local evidence to a signed-in ChatGPT conversation, preserving the raw answer, and verifying every actionable claim back in the repository.
+## Introduction
 
-Codex remains the source of truth. The bridge does not give the web model direct control of the repository and does not treat an external answer as verified implementation guidance.
+Codex is good at working inside a repository: it can inspect code, edit files, run tests, and verify behavior.
 
-## What it guarantees
+A strong reasoning model is useful for a different class of work: algorithm review, research critique, experiment design, and long-horizon analysis.
 
-- One stable `bridge-thread-id` per task.
-- Immutable Codex snapshots, sent bundles, raw GPT exchanges, and Codex verdicts.
-- Repository-relative artifact paths and SHA-256 digests.
-- Fail-closed explicit evidence selection by default.
-- Exact visible model and attachment checks before browser submission.
-- Local verification before implementation or result sign-off.
-- Parent-chain, artifact-hash, and bundle-hash verification before handoff.
+The hard part is connecting the two.
 
-## What it does not guarantee
+### The problem
 
-- A visible `Pro` label proves the selected UI option, not the backend model identity.
-- Auto selection is conservative, not whole-program dependency analysis.
-- The bridge is not an unattended browser service. Login, CAPTCHA, rate limits, and UI changes still require supervision.
-- GPT output is advice until Codex verifies it against local code, tests, configs, data, or logs.
+An external model does not automatically know the repository state, current implementation, local experiments, or decisions already made by Codex.
+
+The usual workaround is manual copy and paste. That quickly becomes a choice between too little context and too much context.
+
+Too little context produces confident advice about code the reviewer never saw. Too much context is noisy, expensive to inspect, hard to update, and more likely to include unrelated or sensitive material.
+
+### The workflow pain
+
+Even when the first handoff works, multi-round collaboration is fragile:
+
+- The answer may no longer match the code snapshot it reviewed.
+- Follow-up questions repeatedly resend the same files.
+- Raw external suggestions become mixed with locally verified facts.
+- The final implementation loses the reasoning and evidence that led to it.
+
+The missing piece is not another chat window. It is a reproducible handoff between local execution and external reasoning.
+
+### The idea
+
+Codex Pro Bridge turns that handoff into a task workflow:
+
+1. Codex selects the evidence needed for one concrete decision.
+2. GPT Pro reviews only that scoped evidence.
+3. Codex returns to the repository, verifies the review, and acts only on supported conclusions.
+
+```mermaid
+sequenceDiagram
+  participant C as Codex
+  participant G as GPT Pro
+  C->>C: Inspect repository and prepare scoped evidence
+  C->>G: Evidence bundle + focused question
+  G-->>C: External review
+  C->>C: Verify claims against code, tests, configs, and logs
+  C->>C: Implement or plan the next experiment
+```
+
+Codex remains the source of truth. GPT Pro acts as an external reviewer, not as the process that edits or validates the repository.
+
+## How it works
+
+Each task uses one bridge thread so the evidence, external review, local verdict, implementation, and later follow-ups remain connected.
+
+The bridge keeps three concerns separate:
+
+- **Evidence construction:** build the smallest package that can support the decision.
+- **External reasoning:** ask a focused question against exactly that evidence.
+- **Local verification:** check every actionable conclusion before changing code or trusting a result.
+
+### Evidence modes
+
+| Mode | Use it for | Repository source |
+| --- | --- | --- |
+| `auto` | First implementation-heavy round | Select a focus, close conservative local dependencies, then add relevant breadth |
+| `explicit` | Focused follow-up | Send only the files that need another review |
+| `none` | Reasoning-only follow-up | Reuse current notes and task context without resending source |
+
+Auto mode follows definitely-local relative imports for JavaScript/TypeScript and Python. Modern Node source and test files such as `.mjs`, `.cjs`, `.mts`, and `.cts` are supported.
+
+Follow-up rounds normally reuse current Codex notes and compact task history. Source is added again only when it changed or the reviewer needs to inspect it.
+
+## When to use it
+
+Codex Pro Bridge is useful when the decision benefits from an independent reasoning pass:
+
+- Reviewing an algorithm, training pipeline, reward design, or evaluation method.
+- Stress-testing a research claim, paper framing, novelty argument, or reviewer story.
+- Turning a proposal into baselines, ablations, metrics, and decision rules.
+- Checking whether code, configs, data splits, commands, logs, and reported results agree.
+- Carrying a complex review across several rounds without losing provenance.
+
+For a small local bug, formatting change, or straightforward implementation task, Codex should usually work directly in the repository without this bridge.
 
 ## Quick start
 
-### 1. Prepare Chrome
-
-Install and enable the Codex Chrome extension. Open `chrome://extensions/`, select the extension, open **Details**, and enable **Allow access to file URLs**.
-
-Without this permission, Chrome may open the upload menu but fail to attach a local bundle.
-
-### 2. Install the skills
+### Install
 
 Global installation:
 
@@ -45,23 +100,21 @@ Repository-local installation:
 ./codex-pro-bridge-skills/install.sh --repo /path/to/repo
 ```
 
-Repository-local installation adds `.agents/` and `.codex/` to that repository's local `.git/info/exclude`. It does not edit the tracked `.gitignore`.
+The bridge uses the signed-in Chrome session available to Codex. The selected skill checks browser prerequisites when an external round begins.
 
 Restart Codex or open a new task if an existing task does not discover the updated skills.
 
-### 3. Ask Codex to run a bridge task
-
-Normal question:
+### Ask a normal question
 
 ```text
 Use $gpt-pro-question-window.
 Use bridge thread <repo>-<date>-<task> and ask GPT Pro:
 <question>
-Require the exact visible Pro selection, capture the raw answer,
-verify it locally, and record a separate Codex verdict.
+Capture the raw answer, verify it locally,
+and record a separate Codex verdict.
 ```
 
-Full algorithm or research loop:
+### Run the full algorithm or research loop
 
 ```text
 Use $gpt-pro-algorithm-pipeline.
@@ -71,119 +124,23 @@ Keep one bridge thread, send only scoped evidence,
 and implement only locally verified changes.
 ```
 
-More prompts are available in [examples/usage_prompts.md](codex-pro-bridge-skills/examples/usage_prompts.md).
-
-## Workflow
-
-Every external round follows the same lifecycle:
-
-```mermaid
-sequenceDiagram
-  participant C as Codex
-  participant G as ChatGPT / GPT Pro
-  C->>C: codex-snapshot
-  C->>C: build bundle + inspect manifest
-  C->>G: visible upload + exact model gate + one submission
-  G-->>C: full raw answer
-  C->>C: capture gpt-exchange
-  C->>C: verify against local evidence
-  C->>C: record codex-verdict
-  C->>C: verify thread parents and hashes
-```
-
-Bundle drafts are not timeline events. Only the bundle actually sent is bound to the captured `gpt-exchange`.
-
-The raw answer and Codex verdict remain separate. Later verification never rewrites the external answer to make it look contemporaneous.
-
-## Evidence modes
-
-| Mode | Use it for | Repository source |
-| --- | --- | --- |
-| `auto` | First implementation-heavy round | Explicit focus seeds when supplied, conservative local dependency closure, then ranked breadth |
-| `explicit` | Focused follow-up | Only named files; missing, filtered, or over-budget evidence fails by default |
-| `none` | Reasoning-only follow-up | No repository source; current notes and compact thread context only |
-
-Auto mode follows definitely-local relative imports for JavaScript/TypeScript and Python. It also supports modern Node source and test files such as `.mjs`, `.cjs`, `.mts`, and `.cts`.
-
-Auto mode records why each file was included. If a required closure exceeds `--max-files`, the build fails instead of silently truncating the evidence.
-
-Use `--allow-incomplete-includes` or `--allow-incomplete-auto-context` only after inspecting and accepting every recorded evidence gap.
-
-## Browser interaction
-
-Use ChatGPT's visible attachment button and visible upload menu item. Do not directly click a hidden input such as `#upload-files`.
-
-Before clicking Send, verify the exact visible model label and attachment name:
-
-The commands below assume repository-local installation. For a global installation, replace `.agents/skills` with `${CODEX_HOME:-$HOME/.codex}/skills`.
-
-```bash
-python3 .agents/skills/gpt-pro-question-window/scripts/check_browser_preflight.py \
-  --requested-model Pro \
-  --selected-ui-label '<exact visible label>' \
-  --bundle /absolute/path/to/bundle.zip \
-  --attachment-name '<visible filename>' \
-  --upload-control visible-menu
-```
-
-Only submit when preflight succeeds. `极高`, an account name containing “Pro”, and the exact `Pro` model option are different observations.
-
-The preflight makes UI observations explicit and fail-closed. It does not independently attest the backend model identity.
-
-Submit once. While generation remains visibly active, keep waiting and report progress rather than resending. On a stalled or protected state, capture diagnostics and stop.
-
-If a response was already produced under a mismatched or unverified model, preserve the raw answer and record that provenance truthfully. Do not relabel it as Pro.
-
-## State and verification
-
-Bridge state is stored under:
-
-```text
-.codex/codex-pro-bridge/
-  threads/             # canonical JSONL ledger + derived Markdown views
-  codex-sessions/      # mutable notes + immutable snapshots
-  gpt-pro-sessions/    # raw exchanges + separate Codex verdicts
-  bundles/             # immutable evidence packages
-```
-
-The JSONL ledger is canonical. Markdown timelines, indexes, and sequence diagrams are derived views.
-
-Before a follow-up round or final handoff, verify the thread:
-
-```bash
-python3 .agents/skills/gpt-pro-question-window/scripts/verify_bridge_thread.py \
-  --repo . \
-  --bridge-thread-id <thread-id> \
-  --require-complete-rounds
-```
-
-The verifier checks event order, parent links, event roles, artifact paths, artifact hashes, bundle hashes, and incomplete final rounds.
+More examples are available in [examples/usage_prompts.md](codex-pro-bridge-skills/examples/usage_prompts.md).
 
 ## Skills
 
 | Skill | Purpose |
 | --- | --- |
-| `gpt-pro-question-window` | Browser control, exact preflight, raw capture, persistence, and thread verification |
-| `bundle-algorithm-context` | Scoped immutable evidence bundles with an explicit evidence contract |
-| `gpt-pro-research-algorithm-reviewer` | Algorithm, pipeline, experiment, and research review |
-| `gpt-pro-paper-brainstormer` | Claims, novelty, reviewer objections, and experiment story |
-| `experiment-plan-generator` | Minimal experiment matrices and decision rules |
-| `implementation-consistency-checker` | Proposal, code, config, data, evaluation, logs, and metric consistency |
-| `gpt-pro-algorithm-pipeline` | Complete evidence, review, verification, experiment, and implementation loop |
+| `gpt-pro-question-window` | Ask a normal question or continue an existing external review |
+| `bundle-algorithm-context` | Build a scoped evidence package for a source-backed round |
+| `gpt-pro-research-algorithm-reviewer` | Review algorithms, pipelines, experiments, and research claims |
+| `gpt-pro-paper-brainstormer` | Develop paper framing, novelty, objections, and experiment story |
+| `experiment-plan-generator` | Convert an idea or review into an experiment matrix |
+| `implementation-consistency-checker` | Check consistency across proposal, code, configs, data, evaluation, and results |
+| `gpt-pro-algorithm-pipeline` | Run the complete evidence, review, verification, experiment, and implementation loop |
 
 Use `$experiment-plan-generator` and `$implementation-consistency-checker` locally when outside reasoning is unnecessary.
 
-## Safety
-
-- Keep evidence inside the repository by default.
-- Inspect and approve every external include; external archive names are anonymized.
-- Exclude env files, credentials, cookies, keys, databases, raw private data, vendor trees, and large unrelated artifacts.
-- Fail on high-confidence secret patterns unless the exact files were manually reviewed.
-- Never move an existing session to another bridge thread or ChatGPT conversation URL.
-- Stop for login, password, 2FA, CAPTCHA, rate limits, abuse warnings, or account-security prompts.
-- Do not publish `.codex/` bridge artifacts unless the user explicitly chooses to do so.
-
-## Development and validation
+## Development
 
 ```bash
 cd codex-pro-bridge-skills
@@ -191,9 +148,7 @@ python3 -m unittest discover -s tests -v
 python3 tests/validate_skills.py
 ```
 
-The repository test and validation path uses only the Python standard library.
-
-## Further documentation
+## Documentation
 
 - [Workflow overview](codex-pro-bridge-skills/docs/WORKFLOW.md)
 - [Canonical bridge protocol](codex-pro-bridge-skills/.agents/skills/gpt-pro-question-window/references/bridge_protocol.md)
