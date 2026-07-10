@@ -5,27 +5,21 @@ description: Use GPT Pro for research-paper brainstorming, claim sharpening, nov
 
 # GPT Pro Paper Brainstormer
 
-Use this skill when the user wants paper/research ideation rather than implementation. Codex should gather just enough context, then ask GPT Pro to act as a research sparring partner.
-
-## When to use
-
-- User asks whether an algorithm idea is publishable.
-- User wants a sharper paper framing.
-- User wants novelty, related work positioning, or reviewer objections.
-- User wants benchmark/dataset/eval story design.
-- User wants to turn engineering work into a research claim.
+Gather only the evidence needed to test the research claim, then ask GPT Pro to act as a skeptical research advisor.
 
 ## Workflow
 
 1. Clarify the raw idea and target venue level if known.
 2. Use `$bundle-algorithm-context` if code, experiments, docs, or logs matter.
-3. Use `$gpt-pro-question-window` to ask GPT Pro with the paper prompt.
-4. Save the response as the next turn in the current GPT Pro session, using the same `bridge-thread-id` as the bundle.
+3. Read [references/paper_brainstorm_prompt.md](references/paper_brainstorm_prompt.md), then use `$gpt-pro-question-window` to ask GPT Pro.
+4. Capture the raw response and record a separate Codex verdict on the same `bridge-thread-id`.
 5. Codex synthesizes:
    - Strongest paper claim.
    - Weakest/most vulnerable claim.
    - Required experiments.
    - Whether this is paper-worthy, workshop-worthy, or just engineering.
+
+Completion criterion: claims and related-work references are marked as verified or unverified, the required experiments are concrete, and the publishability judgment is preserved separately from Codex's local verdict.
 
 ## Prompt dimensions
 

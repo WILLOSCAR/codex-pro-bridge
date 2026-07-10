@@ -66,34 +66,7 @@ Collect:
 
 ## Output format
 
-```text
-# Implementation Consistency Report
-
-## 1. Checked Inputs
-- Proposal/review:
-- Code files:
-- Configs:
-- Commands:
-- Logs/results:
-
-## 2. Matched
-Items that are consistent.
-
-## 3. Mismatched
-Concrete mismatches with file/line references when possible.
-
-## 4. Unclear / Needs User Decision
-Ambiguities or missing evidence.
-
-## 5. Experiment Validity Risk
-Whether current results can be trusted.
-
-## 6. Required Fixes
-Prioritized code/config/eval/logging fixes.
-
-## 7. Re-run Plan
-Commands or steps to rerun after fixes.
-```
+Read and fill [references/consistency_report_schema.md](references/consistency_report_schema.md).
 
 ## Severity labels
 
@@ -105,3 +78,5 @@ Commands or steps to rerun after fixes.
 ## Implementation guidance
 
 When possible, use exact file paths and line references. If line references are not available, quote function/class/config keys. Prefer small fixes and sanity tests before larger refactors.
+
+Completion criterion: every checked interface is classified as matched, mismatched, or missing evidence, and result trustworthiness follows directly from those classifications.

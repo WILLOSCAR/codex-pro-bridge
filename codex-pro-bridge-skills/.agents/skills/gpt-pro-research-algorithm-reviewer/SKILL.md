@@ -5,7 +5,7 @@ description: Deep GPT Pro algorithm/research/pipeline review. Use for RL, reward
 
 # GPT Pro Research Algorithm Reviewer
 
-Use this skill when the user wants more than code review. The target is deep algorithm review, experiment design, and research-level critique.
+Target deep algorithm review, experiment design, and research-level critique rather than ordinary code review.
 
 ## Role split
 
@@ -20,17 +20,19 @@ Do not let GPT Pro directly drive code edits. Treat GPT Pro output as an externa
    - What is the task?
    - What is the new idea or current pipeline?
    - What decision does the user need: go/no-go, implementation plan, experiment plan, paper angle, bug diagnosis?
-2. Invoke or follow `$bundle-algorithm-context` to create a minimal bundle.
-3. Use `$gpt-pro-question-window` to open a signed-in GPT Pro conversation.
-4. Submit the review prompt from `references/deep_algorithm_review_prompt.md` plus the bundle.
-5. Save GPT Pro's answer as the next turn in the current GPT Pro session under `.codex/codex-pro-bridge/gpt-pro-sessions/<gpt-pro-session-id>/`, using the same `bridge-thread-id` as the bundle.
-6. Re-open relevant local files and verify GPT Pro's claims.
+2. Use `$bundle-algorithm-context` to create a minimal bundle and immutable Codex snapshot.
+3. Read and submit [references/deep_algorithm_review_prompt.md](references/deep_algorithm_review_prompt.md) through `$gpt-pro-question-window`.
+4. Capture the raw answer, then validate its structure against [references/review_report_schema.md](references/review_report_schema.md).
+5. Re-open relevant local files and verify GPT Pro's claims.
+6. Record the verification as a separate Codex verdict on the same bridge thread.
 7. Return a Codex-side synthesis:
    - Valid suggestions.
    - Hallucinated or inapplicable suggestions.
    - Minimal experiments.
    - Implementation checkpoints.
    - Go/no-go judgment.
+
+Completion criterion: every actionable claim is locally classified, missing report sections are identified, and the raw answer and Codex verdict remain separate artifacts.
 
 ## Required GPT Pro review dimensions
 

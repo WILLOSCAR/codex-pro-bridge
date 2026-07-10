@@ -1,27 +1,15 @@
-# Optional AGENTS.md Snippet
-
-Add this to your repo's AGENTS.md if you want Codex to remember the workflow.
+# AGENTS.md Snippet
 
 ```markdown
-## Codex Pro Bridge Algorithm Review Workflow
+## Codex Pro Bridge
 
-For high-value algorithm, RL, reward, OPD, agentic, search/QA, evaluation, or paper-idea tasks, do not rely only on local coding intuition. Prefer the repo skills:
+Use one `bridge-thread-id` per task. Follow `codex-snapshot -> gpt-exchange -> codex-verdict`; keep the raw GPT Pro answer separate from later Codex verification.
 
-- `$gpt-pro-algorithm-pipeline` for end-to-end review.
-- `$bundle-algorithm-context` to prepare minimal context.
-- `$gpt-pro-research-algorithm-reviewer` for deep algorithm review.
-- `$gpt-pro-paper-brainstormer` for paper framing.
-- `$experiment-plan-generator` for experiment matrices.
-- `$implementation-consistency-checker` before trusting results.
+Build focused immutable bundles. Default to repository-contained evidence, reject missing or out-of-scope includes, exclude secrets/env/databases/raw private data, and record the sent bundle by relative path plus SHA-256.
 
-Role split:
+Before the first GPT Pro browser round, verify that the Codex Chrome extension is installed and enabled. In this environment, installation from the Chrome Web Store requires a US-region network node. In the extension's **Details**, enable **Allow access to file URLs** or local bundles may not attach.
 
-- Codex reads local repo, builds bundles, implements changes, runs tests, and verifies consistency.
-- GPT Pro reviews algorithm hypotheses, experiment design, novelty, and failure modes.
+Use signed-in Chrome and its file chooser for GPT Pro. Computer Use is only the fallback for UI boundaries Chrome cannot control. Stop for login, password, 2FA, CAPTCHA, rate-limit, abuse, or account-security prompts.
 
-Use one `bridge-thread-id` for each task and reuse it across Codex -> GPT Pro -> Codex rounds. Before building a GPT Pro bundle, write Codex-side session notes under `.codex/codex-pro-bridge/codex-sessions/<codex-session-id>/notes.md`; this updates `.codex/codex-pro-bridge/threads/<bridge-thread-id>.md`. Include a detailed summary of the current Codex reasoning path and, when available, roughly the last 10 relevant raw user/assistant turns. If raw history is unavailable, say so; do not invent missing turns. Keep Codex session IDs and GPT Pro session IDs separate. Keep the full thread ledger locally, but send GPT Pro only compact recent thread context unless older events are directly relevant. Do not resend repository files on every follow-up: use `--repo-context explicit` without `--include` for notes-plus-graph rounds, and add explicit files only when GPT Pro needs to reread code/configs.
-
-Never upload `.env` files, secrets, credentials, cookies, private keys, databases, or raw private data to GPT Pro. Normal included source/config/doc/log contents do not need content rewriting; prefer excluding unsafe files by path/name. If ChatGPT login is required, ask the user to log in manually; do not enter passwords or 2FA codes.
-
-When operating ChatGPT in Chrome, use human-paced browser actions: prefer one conversation, allow two or three when useful, never exceed three concurrent GPT Pro conversations, stagger paste/upload/submit/copy actions, and avoid rapid retries. Stop for CAPTCHA, rate-limit, abuse-warning, unusual login, or account-security prompts and let the user handle them manually.
+Read `.agents/skills/gpt-pro-question-window/references/bridge_protocol.md` before creating or resuming bridge state.
 ```

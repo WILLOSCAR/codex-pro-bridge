@@ -22,10 +22,7 @@ Collect:
 
 ## Required output
 
-Produce a table with:
-
-| Priority | Experiment | Change | Hypothesis tested | Required code/config change | Metric | Success signal | Failure interpretation | Cost | Command |
-|---|---|---|---|---|---|---|---|---|---|
+Read and fill [references/experiment_matrix_template.md](references/experiment_matrix_template.md).
 
 Also produce:
 
@@ -79,3 +76,5 @@ Also produce:
 ## Codex execution
 
 After generating the matrix, inspect the repo and map each experiment to real files and commands. If commands do not exist, propose the minimal code/config additions to make experiments reproducible.
+
+Completion criterion: every experiment maps to real files/configs/commands or explicitly names missing scaffolding, and the decision rule can be evaluated from logged results.

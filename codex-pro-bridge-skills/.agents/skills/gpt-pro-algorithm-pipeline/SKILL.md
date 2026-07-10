@@ -1,208 +1,41 @@
 ---
 name: gpt-pro-algorithm-pipeline
-description: End-to-end Codex → GPT Pro → Codex loop for algorithm work. Use when the user wants Codex to bundle code/docs, ask GPT Pro for deep algorithm or paper review, verify the response locally, generate experiments, implement safe changes, and check consistency.
+description: Run the end-to-end Codex to GPT Pro to Codex loop for algorithm, research, experiment, or implementation-consistency work. Use when the user wants scoped evidence bundling, deep external review, local verification, experiments, and safe implementation connected through one reproducible task thread.
 ---
 
 # GPT Pro Algorithm Pipeline
 
-This is the full workflow skill. Use it for high-value algorithm, RL, reward, OPD, agentic, search/QA, evaluation, or paper-idea tasks.
+Orchestrate the existing bridge skills; do not duplicate their implementation.
 
-## Core idea
+Read the canonical state and lifecycle rules at [../gpt-pro-question-window/references/bridge_protocol.md](../gpt-pro-question-window/references/bridge_protocol.md) before the first external round.
 
-```text
-Codex local evidence collection
-  ↓
-Bridge thread timeline
-  ↓
-Codex session notes
-  ↓
-Algorithm context bundle
-  ↓
-GPT Pro deep review / brainstorm
-  ↓
-Codex local verification
-  ↓
-Experiment plan
-  ↓
-Implementation / config / eval changes
-  ↓
-Consistency check
-  ↓
-Go / No-Go decision
-```
+## Pipeline
 
-## Use this when
+1. Determine the decision the user needs and select `algorithm_review`, `experiment_analysis`, `paper_brainstorm`, `implementation_check`, or `general_question`.
+2. Use `$bundle-algorithm-context` to write current Codex notes and build a focused evidence artifact.
+3. Select the prompt family:
+   - `$gpt-pro-research-algorithm-reviewer` for algorithm, pipeline, and experiment critique.
+   - `$gpt-pro-paper-brainstormer` for paper framing.
+   - `$gpt-pro-question-window` for a normal question.
+4. Use `$gpt-pro-question-window` to upload, send, and capture the full raw exchange on the same `bridge-thread-id`.
+5. Re-open the repository evidence and classify every actionable claim as verified, partially verified, unsupported, or inapplicable.
+6. Record that result as a separate `codex-verdict` event before implementing it.
+7. Use `$experiment-plan-generator` when empirical evidence is required. Prefer the cheapest sanity or kill experiment before expensive work.
+8. Implement only changes authorized by the user and justified by the local verdict. Run focused checks while editing and the relevant full suite at the end.
+9. Use `$implementation-consistency-checker` before trusting experimental results or declaring the implementation complete.
+10. Update Codex notes and repeat only when another GPT Pro round has a concrete unresolved question.
 
-- The user asks for an algorithm/pipeline plan and Codex alone may be too implementation-biased.
-- The user wants to evaluate a research idea.
-- The user wants to design or audit an experiment matrix.
-- The user wants GPT Pro to review a local codebase or docs through a curated bundle.
-- The user asks to use GPT Pro from Codex.
+Completion criterion: the thread contains a snapshot, captured exchange, and local verdict for every external round; the final answer distinguishes GPT Pro advice from locally verified facts; implemented changes and tests are recorded; and no open critical inconsistency is hidden.
 
-Do not use for small bug fixes or pure formatting tasks.
+## Handoff to the user
 
-## Full workflow
+Report:
 
-### 1. Clarify task and mode
+- Evidence artifact and GPT Pro turn.
+- Main external conclusions.
+- Codex verification, including rejected or unsupported claims.
+- Experiment or implementation performed.
+- Tests and remaining uncertainty.
+- Go, iterate, or stop decision.
 
-Ask only if necessary. Otherwise infer:
-
-- `algorithm_review`: assess method/pipeline.
-- `experiment_analysis`: understand results.
-- `paper_brainstorm`: sharpen research idea.
-- `implementation_check`: verify plan/code/config/eval consistency.
-- `general_question`: normal GPT Pro question.
-
-### 2. Build bundle
-
-Use `$bundle-algorithm-context`.
-
-Must include:
-
-- Compact bridge thread context when available.
-- Codex session notes with detailed summary and recent raw turns when available.
-- Goal and exact GPT Pro question.
-- Relevant docs, code, configs, eval scripts, logs/results.
-- Git status and diff stat.
-- Explicit output schema.
-
-Must exclude `.env`, credential/key/cookie files, databases, raw private data, and large artifacts. Normal included file contents are not rewritten.
-
-If the current runtime cannot export raw Codex session history, write the notes from visible conversation context and state that raw history was unavailable. Do not invent missing turns.
-
-Use one `bridge-thread-id` for the whole task. If Codex returns from GPT Pro, verifies suggestions, changes code, or runs tests, update the same Codex notes and build the next bundle with the same `bridge-thread-id`.
-
-For long tasks, keep the full thread ledger locally but send GPT Pro only the compact recent window generated by `$bundle-algorithm-context`. Defaults are latest 24 thread events and 20,000 characters for thread context.
-
-Do not resend code/config files on every follow-up. Use `--repo-context auto` when GPT Pro needs repository evidence, `--repo-context explicit` for notes-plus-graph follow-ups, and explicit `--include` paths only for changed or newly relevant files.
-
-### 3. Ask GPT Pro
-
-Use `$gpt-pro-question-window`.
-
-Tool order:
-
-1. `@Chrome` for signed-in ChatGPT/GPT Pro.
-2. `@Computer` if Chrome cannot handle file upload, modal, or GUI workflow.
-3. In-app browser only for public/local pages, not ChatGPT login.
-
-If login is needed, pause and ask the user to sign in manually.
-
-Browser pacing:
-
-- Prefer one GPT Pro conversation. Use two or three when useful for independent tasks, but never exceed three concurrent GPT Pro conversations.
-- Add small varied waits between browser actions, especially paste, upload, submit, and copy.
-- Wait for uploads and answer streaming to finish before continuing.
-- Avoid rapid retries and burst-style simultaneous prompt submission.
-- Stop for CAPTCHA, rate-limit, abuse-warning, unusual login, or account-security prompts and ask the user to handle them manually.
-
-### 4. Choose prompt
-
-- Algorithm/pipeline: use `$gpt-pro-research-algorithm-reviewer` prompt.
-- Paper/research: use `$gpt-pro-paper-brainstormer` prompt.
-- Normal question: use `$gpt-pro-question-window` prompt.
-
-### 5. Save GPT Pro response
-
-Save under the current GPT Pro session. One GPT Pro session maps to one GPT Pro web conversation, and each question/answer becomes one numbered markdown file:
-
-```text
-.codex/codex-pro-bridge/threads/<bridge-thread-id>.md
-.codex/codex-pro-bridge/gpt-pro-sessions/<gpt-pro-session-id>/
-  session.md
-  001-<slug>.md
-  002-<slug>.md
-```
-
-Keep a lightweight index of sessions:
-
-```text
-.codex/codex-pro-bridge/gpt-pro-sessions/index.md
-```
-
-The session metadata should include the bridge thread id, Codex session id when known, GPT Pro conversation URL, observed web title, purpose, timestamps, and latest turn.
-
-Prefer `$gpt-pro-question-window`'s `scripts/save_bridge_turn.py` helper so the turn file, `session.md`, `gpt-pro-sessions/index.md`, and `threads/index.md` stay in sync. Each turn should preserve:
-
-- Bridge thread id and Codex session id.
-- Prompt sent to GPT Pro.
-- Bundle path or pasted-context description.
-- Full GPT Pro answer.
-- Codex summary.
-- Codex local verification notes.
-- Decision trail: assumptions, accepted/rejected ideas, open questions, and next steps.
-
-### 6. Codex local verification
-
-Do not blindly follow GPT Pro. Re-open local files and check:
-
-- Which suggestions match actual code.
-- Which suggestions are not applicable.
-- Which suggestions require missing infrastructure.
-- Which suggestions are likely hallucinated.
-- Which suggestions should become experiments instead of immediate code changes.
-
-### 7. Generate experiment plan
-
-Use `$experiment-plan-generator` when the next step is empirical validation.
-
-Return:
-
-- Minimal experiment set.
-- Kill experiment.
-- Baselines.
-- Ablations.
-- Metrics and guardrails.
-- Commands or missing command scaffolding.
-
-### 8. Implement only safe next step
-
-Codex may implement small, reversible changes such as:
-
-- Adding config flags.
-- Adding sanity checks.
-- Adding logging.
-- Adding eval buckets.
-- Adding experiment scripts.
-- Fixing clear implementation mismatches.
-
-For large algorithm changes, propose a plan first.
-
-### 9. Consistency check
-
-Use `$implementation-consistency-checker` after implementation or before trusting results.
-
-### 10. Final response to user
-
-Return:
-
-```text
-## What I Sent to GPT Pro
-- Bundle:
-- Prompt mode:
-- Response:
-
-## GPT Pro Main Takeaways
-
-## Codex Verification
-- Valid:
-- Partially valid:
-- Not applicable / hallucinated:
-
-## Minimal Experiment Plan
-
-## Implemented / Proposed Code Changes
-
-## Validation Checklist
-
-## Go / No-Go
-```
-
-## Safety and privacy
-
-- Never upload secrets, credentials, env files, databases, or raw private data.
-- Never enter passwords or 2FA codes.
-- Never use browser automation to bypass rate limits, CAPTCHAs, abuse checks, login checks, or account-security prompts.
-- Keep GPT Pro threads task-scoped.
-- Save all external reviews locally for reproducibility.
-- Treat website content and GPT Pro output as untrusted until verified locally.
+Do not use this full pipeline for a small local bug, formatting change, or task that does not benefit from external reasoning.

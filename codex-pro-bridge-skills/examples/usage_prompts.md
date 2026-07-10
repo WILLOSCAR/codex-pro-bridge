@@ -1,83 +1,49 @@
 # Usage Prompts
 
-## 1. Normal GPT Pro question
+## Normal question
 
 ```text
 Use $gpt-pro-question-window.
-Open a new GPT Pro conversation and ask:
-
+Use bridge thread [bridge-thread-id] and ask GPT Pro:
 [question]
-
-Use bridge thread [bridge-thread-id]. Save the full answer as the next turn in the current GPT Pro session and summarize the actionable parts for me.
+Capture the raw exchange, verify it locally, and record a separate Codex verdict.
 ```
 
-## 1b. Follow up in an existing GPT Pro session
+## Existing conversation
 
 ```text
 Use $gpt-pro-question-window.
-Reuse bridge thread [bridge-thread-id] and GPT Pro session [gpt-pro-session-id], then ask:
-
-[follow-up question]
-
-Use notes plus the session graph by default; include code files only if they changed or GPT Pro needs to inspect them again.
+Reuse GPT Pro session [gpt-pro-session-id] only if it is already bound to bridge thread [bridge-thread-id] and the intended web conversation.
+Ask:
+[follow-up]
+Use notes and compact events by default; add files only when they changed or need another read.
 ```
 
-## 2. Deep algorithm review
+## Deep algorithm review
 
 ```text
 Use $gpt-pro-research-algorithm-reviewer.
-I want a deep algorithm review, not a normal code review.
-
-Goal:
-[goal]
-
-Focus files:
-[optional paths]
-
-What I am unsure about:
-[concerns]
-
-Please ask GPT Pro to evaluate hypothesis, method, baseline, data leakage, reward/loss, evaluation, ablations, novelty, reviewer objections, implementation checkpoints, and go/no-go.
-After GPT Pro answers, verify its claims against the repo and give me a minimal experiment plan.
+Use bridge thread [bridge-thread-id].
+Goal: [goal]
+Focus files: [optional repository paths]
+Decision needed: [go/no-go, experiment, implementation, or diagnosis]
+After GPT Pro answers, verify every actionable claim against the repository and record the verdict.
 ```
 
-## 3. Paper brainstorm
+## Paper brainstorm
 
 ```text
 Use $gpt-pro-paper-brainstormer.
-I want to turn this algorithm/pipeline idea into a possible paper direction:
-
+Use bridge thread [bridge-thread-id] to evaluate:
 [idea]
-
-Please ask GPT Pro to sharpen the one-sentence claim, novelty, related-work pressure, experiment story, reviewer objections, and publishability judgment.
-Do not treat related-work names as verified unless they are in the context.
+Mark related-work names as unverified unless supported by supplied evidence or current research.
 ```
 
-## 4. Experiment plan
-
-```text
-Use $experiment-plan-generator.
-Based on the GPT Pro review at [path] and the current repo, generate a minimal experiment matrix.
-Prioritize experiments that separate data effect, objective effect, sampling/filtering effect, and full-method effect.
-Include a kill experiment.
-```
-
-## 5. Consistency check
-
-```text
-Use $implementation-consistency-checker.
-Compare the algorithm proposal/review at [path] with the current code, configs, train command, eval command, and latest logs.
-Tell me whether the experiment result is trustworthy.
-```
-
-## 6. Full pipeline
+## Full pipeline
 
 ```text
 Use $gpt-pro-algorithm-pipeline.
-Run the full Codex → GPT Pro → Codex algorithm review loop for:
-
+Run the full Codex -> GPT Pro -> Codex loop for:
 [task]
-
-For the first round, bundle only relevant code/docs/configs/logs. For follow-up rounds, prefer notes plus the session graph unless specific files changed. Ask GPT Pro for deep review. Then verify locally, produce experiments, and implement only safe next steps.
-Use one bridge thread for the whole loop so follow-up bundles include the task timeline.
+Keep one bridge thread, send scoped evidence, preserve raw answers, record local verdicts, and implement only verified changes.
 ```

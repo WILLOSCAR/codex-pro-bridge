@@ -1,152 +1,112 @@
 # Codex Pro Bridge
 
-Codex Pro Bridge connects local Codex work with GPT Pro in the ChatGPT web UI, while keeping the repository as the source of truth.
+Codex Pro Bridge connects local Codex work with external reasoning in the signed-in ChatGPT/GPT Pro web UI.
 
-It is built for algorithm, research, and engineering loops where Codex and GPT Pro are useful for different reasons.
+Codex remains the local source of truth: it selects evidence, reads and changes code, runs tests, and verifies claims. GPT Pro receives a scoped evidence package and returns an external review. The bridge preserves each handoff without treating the external answer as ground truth.
 
-Codex is strongest inside the repo. It reads files, edits code, runs tests, inspects logs, and checks whether a proposal matches the actual implementation.
-
-GPT Pro is useful when the question needs slower external reasoning: algorithm critique, failure-mode discovery, ablation design, experiment planning, paper framing, and adversarial review.
-
-The fragile part is the handoff. Without a bridge, the workflow becomes browser switching and copy/paste. Context loses shape, decisions scatter, and the web conversation can drift away from the real code.
-
-This package gives the loop a durable shape. Codex writes local notes, builds an evidence-bounded bundle, asks GPT Pro through the web UI, saves the full answer locally, summarizes it, verifies it against the repo, and updates the same task timeline before the next round.
-
-## What This Is
-
-Codex Pro Bridge is not an API client and it does not make GPT Pro edit files directly.
-
-It is a local workflow layer made of Codex skills and helper scripts. It turns a GPT Pro web conversation into a local engineering artifact that can be reused, audited, and connected back to code.
-
-## Why It Exists
-
-The bridge is meant to reduce several common losses:
-
-- Attention loss from switching between the repo, Codex, and the browser.
-- Structure loss when prompts, files, assumptions, follow-ups, and decisions are copied manually.
-- Reproducibility loss when nobody knows what GPT Pro saw in a previous round.
-- State drift when the web conversation no longer matches the current repository.
-- Implementation loss when a good research idea never makes it back into tests, configs, logs, or code.
-
-## Included Skills
-
-The package lives under `codex-pro-bridge-skills/.agents/skills`.
+## Skills
 
 | Skill | Purpose |
 | --- | --- |
-| `gpt-pro-question-window` | Open or reuse a signed-in GPT Pro web conversation, ask a scoped question, optionally attach context, and save the response. |
-| `bundle-algorithm-context` | Build a compact direct-evidence bundle from code, configs, docs, logs, and notes while excluding unsafe or oversized files. |
-| `gpt-pro-research-algorithm-reviewer` | Ask GPT Pro for deep algorithm or research review: assumptions, failure modes, evaluation, ablations, novelty, and go/no-go guidance. |
-| `gpt-pro-paper-brainstormer` | Refine paper framing, claims, reviewer objections, novelty, and experiment narrative. |
-| `experiment-plan-generator` | Convert a review into a prioritized experiment matrix and executable checklist. |
-| `implementation-consistency-checker` | Verify that proposals, code, configs, data splits, eval scripts, and logs agree with each other. |
-| `gpt-pro-algorithm-pipeline` | Run the full loop: bundle context, ask GPT Pro, verify locally, plan experiments, and implement only the safe next step. |
+| `gpt-pro-question-window` | Browser and persistence adapter: upload, ask, capture the raw answer, then record Codex verification. |
+| `bundle-algorithm-context` | Build a scoped, immutable evidence bundle with an explicit evidence contract. |
+| `gpt-pro-research-algorithm-reviewer` | Deep algorithm, pipeline, experiment, and research review. |
+| `gpt-pro-paper-brainstormer` | Paper claim, novelty, reviewer-objection, and experiment-story review. |
+| `experiment-plan-generator` | Convert a review into a minimal experiment matrix and decision rule. |
+| `implementation-consistency-checker` | Verify proposal, code, config, commands, data splits, eval, logs, and metrics. |
+| `gpt-pro-algorithm-pipeline` | Orchestrate the complete evidence, review, verification, experiment, and implementation loop. |
 
-## Core Model
+## Mechanism
 
-The workflow keeps one task-level thread and two endpoint sessions.
-
-| Object | Meaning |
-| --- | --- |
-| Bridge thread | The task timeline shared by Codex and GPT Pro rounds. |
-| Codex session | The local Codex-side state: summary, recent raw turns when available, decisions, verification, and next question. |
-| GPT Pro session | One GPT Pro web conversation, plus numbered saved turns copied back to the repo. |
-| Bundle | A per-round evidence package, usually a zip for source files plus a small manifest. |
-
-Use one `bridge-thread-id` for the whole task. Derive the two endpoint IDs from it:
-
-```text
-Bridge thread: <task>-<YYYYMMDD>-<short-topic>
-Codex session: <bridge-thread-id>-codex
-GPT Pro session: <bridge-thread-id>-gpt-pro
-```
-
-The bridge thread is the durable spine. Helpers do not pass a separate graph around; they only reuse the same `bridge-thread-id`. Each helper call appends a structured event to that thread: `codex-update`, `bundle`, or `gpt-pro-turn`.
-
-The Mermaid `gitGraph` is a view derived from that append-only thread ledger. Codex-side events stay on the main line, while GPT Pro turns are shown as GPT Pro-side events. The graph can be regenerated from the thread at any time, so it stays light and has no separate state to keep in sync.
-
-## Workflow
+One task exposes one required `bridge-thread-id`. Codex and GPT Pro session IDs are derived unless an existing compatible session is explicitly reused.
 
 ```mermaid
-flowchart LR
-  U["User task"] --> C1["Codex inspects repo"]
-  C1 --> N["Write Codex notes"]
-  N --> B["Build evidence bundle"]
-  B --> W["Ask GPT Pro in web UI"]
-  W --> R["Save full GPT Pro answer"]
-  R --> V["Codex verifies locally"]
-  V --> D{"Need another round?"}
-  D -- "Yes" --> N
-  D -- "No" --> F["Implement or report decision"]
+sequenceDiagram
+  participant C as Codex
+  participant G as GPT Pro
+  C->>C: codex-snapshot
+  C->>G: focused bundle + prompt
+  G-->>C: full raw answer
+  C->>C: gpt-exchange captured
+  C->>C: local verification
+  C->>C: codex-verdict
 ```
 
-The important handshake is:
+The canonical timeline is append-only JSONL. Markdown timelines, indexes, and the sequence diagram are derived views. Immutable snapshots, bundles, GPT Pro turns, and Codex verdicts are linked by repository-relative paths and SHA-256 digests.
 
-- Before GPT Pro: Codex makes local state explicit in notes and a bundle.
-- During GPT Pro: only the scoped bundle or follow-up context is pasted or uploaded.
-- After GPT Pro: Codex saves the full answer, summarizes it, verifies it locally, and records the decision trail.
-- Next round: Codex reuses the same bridge thread, but usually sends only notes plus the session graph.
+Bundle construction attempts are not task events. The bundle actually sent is recorded with the corresponding GPT exchange. This keeps smoke tests and abandoned drafts out of the task history.
 
-For multi-round work, the first GPT Pro round may include code or config evidence. Later rounds usually carry Codex notes, compact thread context, and the session graph. Each round appends one event to the same bridge thread, and the graph is generated from that shared timeline. Add files again only when they changed or GPT Pro needs to inspect them.
+The complete state contract and commands live in [bridge_protocol.md](codex-pro-bridge-skills/.agents/skills/gpt-pro-question-window/references/bridge_protocol.md).
+
+## Multi-round work
+
+The first round may include focused code, configs, docs, and results. Follow-up rounds normally send current Codex notes and a compact recent event window. Add files again only when they changed or GPT Pro must inspect them.
+
+Capture the raw GPT Pro answer immediately. Record Codex verification later as a separate verdict; never edit the external answer to make later conclusions look contemporaneous.
 
 ## Install
 
-### Global Codex Install
+Browser prerequisite:
+
+1. Install and enable the Codex extension in Chrome. In this environment, use a US-region network node while downloading it from the Chrome Web Store.
+2. Open `chrome://extensions/`, select the Codex extension, open **Details**, and enable **Allow access to file URLs**.
+
+Without this permission, Chrome may open the upload control but fail to attach the local bundle.
+
+Global:
 
 ```bash
-mkdir -p ~/.codex/skills
-cp -R codex-pro-bridge-skills/.agents/skills/* ~/.codex/skills/
+./codex-pro-bridge-skills/install.sh --global
 ```
 
-Restart Codex if the skills do not appear.
-
-### Repo-Local Install
+Repository-local:
 
 ```bash
-mkdir -p /path/to/repo/.agents
-cp -R codex-pro-bridge-skills/.agents/skills /path/to/repo/.agents/
+./codex-pro-bridge-skills/install.sh --repo /path/to/repo
 ```
 
-## Quick Prompts
+The installer replaces only the seven managed skills and their hidden shared runtime. It removes stale files inside those managed directories and leaves unrelated global skills untouched.
 
-Normal GPT Pro question:
+Repository-local installation also adds `.agents/` and `.codex/` to that repository's local `.git/info/exclude`, preventing local skills and bridge artifacts from appearing in commits.
+
+Restart Codex if an existing session does not discover the updated skills.
+
+## Use
+
+Normal question:
 
 ```text
 Use $gpt-pro-question-window.
-Open a GPT Pro conversation and ask:
-[question]
-Save the full answer as the next turn in the current GPT Pro session, then summarize the useful parts.
-Use bridge thread <bridge-thread-id> for this task.
+Use bridge thread <repo>-<date>-<task> and ask GPT Pro:
+<question>
+Capture the raw answer, verify it locally, and record a separate Codex verdict.
 ```
 
-Deep algorithm review:
-
-```text
-Use $gpt-pro-research-algorithm-reviewer.
-I want a deep algorithm review, not a normal code review.
-Goal: [algorithm/pipeline/research goal]
-Focus files: [paths]
-Current concern: [what feels uncertain]
-Return: diagnosis, failure modes, ablation plan, implementation checkpoints, and a go/no-go decision.
-```
-
-Full Codex -> GPT Pro -> Codex loop:
+Full algorithm/research loop:
 
 ```text
 Use $gpt-pro-algorithm-pipeline.
-Run the full Codex -> GPT Pro -> Codex algorithm review loop for:
-[task]
-After GPT Pro responds, verify the claims against the repo, filter hallucinations, produce a minimal experiment plan, and implement only the safe next step.
+Run the Codex -> GPT Pro -> Codex loop for:
+<task>
+Keep one bridge thread, send only scoped evidence, and do not act on unverified claims.
 ```
 
-## Safety Rules
+## Safety
 
-- Do not upload `.env`, credentials, cookies, private keys, tokens, databases, or full user data dumps.
-- The bundle builder excludes obvious secret, env, raw-data, database, vendor, and large artifact files by path and name.
-- Normal included source, config, doc, and log contents are not rewritten. They are either included as evidence or omitted.
-- If ChatGPT is not signed in, ask the user to sign in manually. Do not enter passwords or 2FA codes.
-- Prefer one GPT Pro conversation. Use two or three only when useful, and never exceed three concurrent conversations.
-- Add small varied waits between paste, upload, submit, copy, and navigation actions.
-- Stop for CAPTCHA, rate-limit, abuse-warning, unusual login, or account-security prompts.
-- Treat GPT Pro output as external review, not ground truth.
-- Let Codex verify every suggested change against code, configs, tests, and logs before editing.
+- Keep evidence inside the repository by default. External includes require explicit approval and receive anonymized archive names.
+- Reject missing includes, immutable-artifact overwrites, session rebinding, and high-confidence secret patterns.
+- Do not upload env files, credentials, cookies, keys, databases, raw private data, or unrelated artifacts.
+- Uploaded manifests use a safe repository label, never the absolute local path.
+- Use signed-in Chrome with the Codex extension installed and enabled. Keep **Allow access to file URLs** on; use Computer Use only for UI boundaries Chrome cannot control.
+- Stop for login, password, 2FA, CAPTCHA, rate-limit, abuse, or account-security prompts.
+- Never publish `.codex/` bridge artifacts unless the user explicitly chooses to do so.
+
+## Validate
+
+```bash
+cd codex-pro-bridge-skills
+python3 -m unittest discover -s tests -v
+python3 tests/validate_skills.py
+```
+
+The test and validation path uses only the Python standard library.
