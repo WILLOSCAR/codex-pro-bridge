@@ -4,51 +4,66 @@
 
 ## Introduction
 
-Codex is good at working inside a repository: it can inspect code, edit files, run tests, and verify behavior.
+Codex Pro Bridge is built for work that moves back and forth between algorithm design, research reasoning, and engineering implementation.
 
-A strong reasoning model is useful for a different class of work: algorithm review, research critique, experiment design, and long-horizon analysis.
+Codex and GPT Pro are both useful, but they are useful in different places and at different speeds.
 
-The hard part is connecting the two.
+Codex belongs close to the local repository. It can read files, change code, run tests, inspect logs, and check whether a proposal actually matches the current implementation.
+
+GPT Pro is better suited to slower external reasoning: challenging an algorithm, mapping failure modes, designing ablations, planning experiments, framing a paper, or trying to disprove an idea.
+
+The fragile part is the handoff between them.
 
 ### The problem
 
-An external model does not automatically know the repository state, current implementation, local experiments, or decisions already made by Codex.
+Without a bridge, the workflow becomes a loop through the repository, Codex, and a browser, held together by manual copy and paste.
 
-The usual workaround is manual copy and paste. That quickly becomes a choice between too little context and too much context.
+The external model does not automatically know the repository state, current implementation, local experiments, or decisions already made by Codex.
+
+Providing that context quickly becomes a choice between too little and too much.
 
 Too little context produces confident advice about code the reviewer never saw. Too much context is noisy, expensive to inspect, hard to update, and more likely to include unrelated or sensitive material.
 
 ### The workflow pain
 
-Even when the first handoff works, multi-round collaboration is fragile:
+The handoff creates several kinds of loss:
 
-- The answer may no longer match the code snapshot it reviewed.
-- Follow-up questions repeatedly resend the same files.
-- Raw external suggestions become mixed with locally verified facts.
-- The final implementation loses the reasoning and evidence that led to it.
+- **Attention loss:** work repeatedly switches between the repository, Codex, and the browser.
+- **Structure loss:** prompts, files, assumptions, follow-ups, and decisions scatter as they are copied between tools.
+- **Reproducibility loss:** later it becomes difficult to know exactly what evidence GPT Pro reviewed.
+- **State drift:** the web conversation continues while the repository, experiments, and implementation change underneath it.
+- **Implementation loss:** a useful algorithm or research idea never makes it back into tests, configs, logs, and working code.
+
+In one round, these are workflow frictions. Across several rounds, they make the review difficult to reuse, audit, or implement.
 
 The missing piece is not another chat window. It is a reproducible handoff between local execution and external reasoning.
 
 ### The idea
 
-Codex Pro Bridge turns that handoff into a task workflow:
+Codex Pro Bridge is not an API client, and it does not let GPT Pro edit local files directly.
 
-1. Codex selects the evidence needed for one concrete decision.
-2. GPT Pro reviews only that scoped evidence.
-3. Codex returns to the repository, verifies the review, and acts only on supported conclusions.
+It is a local workflow layer made of Codex skills and helper scripts. It turns a GPT Pro web review into engineering material that can be reused, traced, and connected back to the real repository.
+
+The workflow is:
+
+1. Codex writes local notes for one concrete task.
+2. Codex builds a bundle with an explicit evidence boundary.
+3. GPT Pro reviews that scoped material in the web conversation.
+4. Codex saves the complete answer, summarizes it, and verifies actionable claims locally.
+5. The same task continues into implementation, experiments, or another focused review round.
 
 ```mermaid
 sequenceDiagram
   participant C as Codex
   participant G as GPT Pro
-  C->>C: Inspect repository and prepare scoped evidence
-  C->>G: Evidence bundle + focused question
+  C->>C: Inspect repository and write task notes
+  C->>G: Evidence-bounded bundle + focused question
   G-->>C: External review
-  C->>C: Verify claims against code, tests, configs, and logs
-  C->>C: Implement or plan the next experiment
+  C->>C: Save, summarize, and verify the full answer
+  C->>C: Implement, experiment, or continue the same task
 ```
 
-Codex remains the source of truth. GPT Pro acts as an external reviewer, not as the process that edits or validates the repository.
+The goal is to make the loop reusable, auditable, and implementable. Codex remains the source of truth; GPT Pro remains an external reviewer.
 
 ## How it works
 
