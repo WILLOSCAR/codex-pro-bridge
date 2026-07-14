@@ -101,6 +101,16 @@ Follow-up 通常只复用当前 Codex notes 和精简任务历史。只有文件
 
 ## 快速开始
 
+### 使用前准备
+
+第一次使用 Bridge 前：
+
+1. 使用美区网络，从 Chrome Web Store 安装并启用 [Codex 扩展](https://chromewebstore.google.com/detail/codex/hehggadaopoacecdllhhajmbjkdcmajg)。
+2. 打开 `chrome://extensions/?id=hehggadaopoacecdllhhajmbjkdcmajg`，进入扩展的 **Details**，开启 **Allow access to file URLs**。
+3. 在 Codex 将使用的同一个 Chrome profile 中登录 ChatGPT。
+
+以上只需设置一次。每次开始外部评审前，选中的 skill 会再次检查这些前置条件。
+
 ### 安装
 
 全局安装：
@@ -114,8 +124,6 @@ Follow-up 通常只复用当前 Codex notes 和精简任务历史。只有文件
 ```bash
 ./codex-pro-bridge-skills/install.sh --repo /path/to/repo
 ```
-
-Bridge 使用 Codex 可访问的已登录 Chrome session。外部评审开始时，选中的 skill 会自行检查浏览器前置条件。
 
 如果已有 Codex task 没有发现更新后的 skills，请重启 Codex 或新建 task。
 

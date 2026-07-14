@@ -101,6 +101,16 @@ For a small local bug, formatting change, or straightforward implementation task
 
 ## Quick start
 
+### Prerequisites
+
+Before using the bridge for the first time:
+
+1. Use a US-region network connection to install and enable the [Codex extension](https://chromewebstore.google.com/detail/codex/hehggadaopoacecdllhhajmbjkdcmajg) from the Chrome Web Store.
+2. Open `chrome://extensions/?id=hehggadaopoacecdllhhajmbjkdcmajg`, open the extension's **Details**, and enable **Allow access to file URLs**.
+3. Sign in to ChatGPT with the same Chrome profile that Codex will use.
+
+These are one-time setup steps. The selected skill checks them again before an external review round.
+
 ### Install
 
 Global installation:
@@ -114,8 +124,6 @@ Repository-local installation:
 ```bash
 ./codex-pro-bridge-skills/install.sh --repo /path/to/repo
 ```
-
-The bridge uses the signed-in Chrome session available to Codex. The selected skill checks browser prerequisites when an external round begins.
 
 Restart Codex or open a new task if an existing task does not discover the updated skills.
 
