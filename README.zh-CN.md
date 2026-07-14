@@ -169,3 +169,11 @@ python3 tests/validate_skills.py
 - [Canonical bridge protocol](codex-pro-bridge-skills/.agents/skills/gpt-pro-question-window/references/bridge_protocol.md)
 - [Evidence bundle schema](codex-pro-bridge-skills/.agents/skills/bundle-algorithm-context/references/bundle_schema.md)
 - [AGENTS.md 集成片段](codex-pro-bridge-skills/docs/AGENTS_APPEND_SNIPPET.md)
+
+## Star History
+
+[![GitHub Stars](https://img.shields.io/github/stars/WILLOSCAR/codex-pro-bridge?style=flat-square&label=GitHub%20Stars)](https://www.star-history.com/#WILLOSCAR/codex-pro-bridge&Date)
+
+## 鸣谢
+
+感谢 [Linux.do](https://linux.do/) 社区提供的讨论、反馈与支持。
