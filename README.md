@@ -286,7 +286,12 @@ Use `$experiment-plan-generator` and `$implementation-consistency-checker` local
 
 ## Star History
 
-[![Star history chart](assets/star-history.svg)](https://www.star-history.com/?repos=WILLOSCAR%2Fcodex-pro-bridge&type=date&legend=top-left)
+<a href="https://www.star-history.com/?repos=WILLOSCAR%2Fcodex-pro-bridge&type=date&legend=top-left">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/star-history/star-history-dark.svg">
+    <img alt="Star history chart" src="assets/star-history/star-history-light.svg">
+  </picture>
+</a>
 
 ## Acknowledgements
 
