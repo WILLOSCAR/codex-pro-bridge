@@ -40,7 +40,7 @@ done
 
 for name in "${managed[@]}"; do
   case "$name" in
-    .shared|bundle-algorithm-context|experiment-plan-generator|gpt-pro-algorithm-pipeline|gpt-pro-paper-brainstormer|gpt-pro-question-window|gpt-pro-research-algorithm-reviewer|implementation-consistency-checker) ;;
+    .shared|bundle-algorithm-context|experiment-plan-generator|gpt-pro-algorithm-pipeline|gpt-pro-paper-brainstormer|gpt-pro-project-workspace|gpt-pro-question-window|gpt-pro-research-algorithm-reviewer|implementation-consistency-checker) ;;
     *) echo "Refusing unexpected managed entry: $name" >&2; exit 2 ;;
   esac
   rm -rf "$DST_DIR/$name"

@@ -18,12 +18,13 @@ Repository-local installation:
 ./install.sh --repo /path/to/repo
 ```
 
-The installer replaces only the seven managed skills and `.shared`. Repository-local installation also adds `.agents/` and `.codex/` to the target repository's local `.git/info/exclude`.
+The installer replaces only the eight managed skills and `.shared`. Repository-local installation also adds `.agents/` and `.codex/` to the target repository's local `.git/info/exclude`.
 
 ## Entry points
 
 | Need | Skill |
 | --- | --- |
+| Bind, inspect, route, or repair a ChatGPT Project | `$gpt-pro-project-workspace` |
 | Normal question or existing conversation | `$gpt-pro-question-window` |
 | Deep algorithm, pipeline, or experiment review | `$gpt-pro-research-algorithm-reviewer` |
 | Paper framing and reviewer pressure test | `$gpt-pro-paper-brainstormer` |
@@ -31,13 +32,12 @@ The installer replaces only the seven managed skills and `.shared`. Repository-l
 | Local experiment matrix | `$experiment-plan-generator` |
 | Local implementation/result consistency check | `$implementation-consistency-checker` |
 
-`$bundle-algorithm-context` prepares evidence for source-backed external rounds.
+`$gpt-pro-question-window` resolves `local_only`, `standalone`, and `project`
+routes automatically. `$bundle-algorithm-context` prepares evidence for
+source-backed external rounds.
 
-See [usage_prompts.md](examples/usage_prompts.md) for invocation examples. Operational details live in the relevant skills and the [canonical protocol](.agents/skills/gpt-pro-question-window/references/bridge_protocol.md).
-
-## Validate
-
-```bash
-python3 -m unittest discover -s tests -v
-python3 tests/validate_skills.py
-```
+See [usage_prompts.md](examples/usage_prompts.md) for invocation examples.
+Operational details live in the relevant skills, the
+[canonical protocol](.agents/skills/gpt-pro-question-window/references/bridge_protocol.md),
+and the
+[Project protocol](.agents/skills/gpt-pro-project-workspace/references/project_protocol.md).

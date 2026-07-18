@@ -20,12 +20,14 @@ Do not let GPT Pro directly drive code edits. Treat GPT Pro output as an externa
    - What is the task?
    - What is the new idea or current pipeline?
    - What decision does the user need: go/no-go, implementation plan, experiment plan, paper angle, bug diagnosis?
-2. Use `$bundle-algorithm-context` to create a minimal bundle and immutable Codex snapshot.
-3. Read and submit [references/deep_algorithm_review_prompt.md](references/deep_algorithm_review_prompt.md) through `$gpt-pro-question-window`.
-4. Capture the raw answer, then validate its structure against [references/review_report_schema.md](references/review_report_schema.md).
-5. Re-open relevant local files and verify GPT Pro's claims.
-6. Record the verification as a separate Codex verdict on the same bridge thread.
-7. Return a Codex-side synthesis:
+2. Preview the route through `$gpt-pro-project-workspace`. Preserve its scope,
+   Project, Thread, and conversation policy throughout the review.
+3. Use `$bundle-algorithm-context` to create a minimal bundle and immutable Codex snapshot.
+4. Read and submit [references/deep_algorithm_review_prompt.md](references/deep_algorithm_review_prompt.md) through `$gpt-pro-question-window`.
+5. Capture the raw answer, then validate its structure against [references/review_report_schema.md](references/review_report_schema.md).
+6. Re-open relevant local files and verify GPT Pro's claims.
+7. Record the verification as a separate Codex verdict on the same bridge thread.
+8. Return a Codex-side synthesis:
    - Valid suggestions.
    - Hallucinated or inapplicable suggestions.
    - Minimal experiments.

@@ -10,10 +10,13 @@ Gather only the evidence needed to test the research claim, then ask GPT Pro to 
 ## Workflow
 
 1. Clarify the raw idea and target venue level if known.
-2. Use `$bundle-algorithm-context` if code, experiments, docs, or logs matter.
-3. Read [references/paper_brainstorm_prompt.md](references/paper_brainstorm_prompt.md), then use `$gpt-pro-question-window` to ask GPT Pro.
-4. Capture the raw response and record a separate Codex verdict on the same `bridge-thread-id`.
-5. Codex synthesizes:
+2. Preview the route through `$gpt-pro-project-workspace`. Preserve the returned
+   Project and Thread identity, or use the standalone path when no shared
+   Project context is needed.
+3. Use `$bundle-algorithm-context` if code, experiments, docs, or logs matter.
+4. Read [references/paper_brainstorm_prompt.md](references/paper_brainstorm_prompt.md), then use `$gpt-pro-question-window` to ask GPT Pro.
+5. Capture the raw response and record a separate Codex verdict on the same `bridge-thread-id`.
+6. Codex synthesizes:
    - Strongest paper claim.
    - Weakest/most vulnerable claim.
    - Required experiments.

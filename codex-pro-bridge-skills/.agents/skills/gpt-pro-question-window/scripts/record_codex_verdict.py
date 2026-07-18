@@ -31,6 +31,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Record a Codex verdict for a captured GPT Pro turn.")
     parser.add_argument("--repo", default=".")
     parser.add_argument("--bridge-thread-id", required=True)
+    parser.add_argument("--bridge-project-id", default="")
     parser.add_argument("--codex-session-id", default="")
     parser.add_argument("--gpt-pro-session-id", default="")
     parser.add_argument("--turn", required=True, help="Captured GPT Pro turn file under the repository root.")
@@ -62,6 +63,7 @@ def main() -> int:
             thread_id=thread_id,
             gpt_pro_session_id=gpt_session_id,
             codex_session_id=codex_session_id,
+            bridge_project_id=args.bridge_project_id,
             turn_path=resolve_repo_path(args.turn, repo),
             summary=read_value(args.summary, args.summary_file),
             verification=read_value(args.verification, args.verification_file),

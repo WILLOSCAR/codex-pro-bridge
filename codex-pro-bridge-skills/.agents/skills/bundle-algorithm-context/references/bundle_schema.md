@@ -10,7 +10,9 @@ context/
 
 `README_FOR_GPT_PRO.md` should contain:
 
-1. Metadata: safe repository label, branch, commit, task mode, bridge thread id. Never include the absolute local repository path.
+1. Metadata: safe repository label, branch, commit, task mode, bridge thread id,
+   and optional Bridge Project id. Never include the absolute local repository
+   path.
 2. Codex session id and required Codex session notes path.
 3. Repository context policy: `auto`, `explicit`, or `none`.
 4. User goal and exact question for GPT Pro.
@@ -23,7 +25,11 @@ context/
 
 `source/` should contain selected source/config/doc files as normal files, not pasted into one large markdown.
 
-`context/` should contain Codex session notes, compact bridge event context, git status/diff stat, and optional extra notes.
+`context/` should contain Codex session notes, compact bridge event context,
+git status/diff stat, optional extra notes, and
+`bridge-project-context.md` for Project-bound rounds. That generated file
+contains compact identity, binding, brief, and task context; it is not itself a
+remote Project Source.
 
 A single markdown bundle is acceptable only for very small evidence or when upload is unavailable and the user approves the fallback.
 

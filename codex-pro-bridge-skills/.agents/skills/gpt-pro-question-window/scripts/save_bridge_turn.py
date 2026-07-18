@@ -34,6 +34,7 @@ from bridge_store import (  # noqa: E402
     write_bound_metadata,
     write_session_index,
 )
+from project_store import BridgeProjectStore  # noqa: E402
 
 
 def read_value(text: str, file_path: str) -> str:
@@ -73,7 +74,25 @@ def validate_web_url(value: str) -> str:
     )
     if not allowed:
         raise BridgeError("GPT Pro URL must point to a ChatGPT conversation")
+    parts = [part for part in parsed.path.split("/") if part]
+    standalone_conversation = (
+        len(parts) == 2 and parts[0] == "c" and bool(parts[1])
+    )
+    project_conversation = (
+        len(parts) == 4
+        and parts[0] == "g"
+        and bool(parts[1])
+        and parts[2] == "c"
+        and bool(parts[3])
+    )
+    if not (standalone_conversation or project_conversation):
+        raise BridgeError("GPT Pro URL must identify a conversation")
     return value
+
+
+def project_segment_from_conversation_url(value: str) -> str:
+    parts = [part for part in urlparse(value).path.split("/") if part]
+    return parts[1] if len(parts) == 4 and parts[0] == "g" and parts[2] == "c" else ""
 
 
 def validate_timestamp(value: str, flag: str, *, default_now: bool = False) -> str:
@@ -97,6 +116,10 @@ def build_turn(
     number: int,
     title: str,
     thread_id: str,
+    bridge_project_id: str,
+    remote_project_id: str,
+    observed_workspace: str,
+    observed_account_label: str,
     gpt_session_id: str,
     codex_session_id: str,
     web_url: str,
@@ -127,6 +150,10 @@ def build_turn(
             "",
             "## Metadata",
             f"- Bridge Thread ID: `{thread_id}`",
+            f"- Bridge Project ID: `{bridge_project_id or '-'}`",
+            f"- ChatGPT Project ID: `{remote_project_id or '-'}`",
+            f"- Observed workspace: `{observed_workspace or '-'}`",
+            f"- Observed account: `{observed_account_label or '-'}`",
             f"- GPT Pro Session ID: `{gpt_session_id}`",
             f"- Codex Session ID: `{codex_session_id}`",
             f"- GPT Pro URL: {web_url}",
@@ -177,6 +204,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Capture a GPT Pro answer as an immutable exchange.")
     parser.add_argument("--repo", default=".")
     parser.add_argument("--bridge-thread-id", required=True, help="Canonical task id.")
+    parser.add_argument("--bridge-project-id", default="", help="Optional parent Bridge Project.")
+    parser.add_argument(
+        "--remote-project-id",
+        default="",
+        help="Observed ChatGPT Project id for a Project-bound conversation.",
+    )
+    parser.add_argument("--observed-workspace", default="")
+    parser.add_argument("--observed-account-label", default="")
     parser.add_argument("--codex-session-id", default="", help="Defaults to <bridge-thread-id>-codex.")
     parser.add_argument("--codex-notes", default="", help="Defaults to the current Codex notes for this thread.")
     parser.add_argument("--gpt-pro-session-id", "--session-id", dest="gpt_pro_session_id", default="", help="Defaults to <bridge-thread-id>-gpt-pro.")
@@ -277,6 +312,80 @@ def main() -> int:
                 f"Codex session {codex_session_id} is bound to "
                 f"{codex_meta['bridge_thread_id']}, not {thread_id}"
             )
+        project_store = BridgeProjectStore(repo)
+        bridge_project_id = (
+            args.bridge_project_id
+            or codex_meta.get("bridge_project_id", "")
+            or project_store.project_for_thread(thread_id)
+        )
+        remote_project_id = ""
+        observed_workspace = args.observed_workspace.strip()
+        observed_account_label = args.observed_account_label.strip()
+        if bridge_project_id:
+            bridge_project_id = project_store.resolve_project_id(bridge_project_id)
+            bridge_project = project_store.load_project(bridge_project_id)
+            if bridge_project["status"] != "active":
+                raise BridgeError(
+                    f"Bridge Project {bridge_project_id} is archived; "
+                    "reactivate it before capturing Project rounds"
+                )
+            if codex_meta.get("bridge_project_id") not in (
+                None,
+                "",
+                bridge_project_id,
+            ):
+                raise BridgeError(
+                    f"Codex session {codex_session_id} belongs to "
+                    f"{codex_meta['bridge_project_id']}, not {bridge_project_id}"
+                )
+            if project_store.project_for_thread(thread_id) != bridge_project_id:
+                raise BridgeError(
+                    f"Bridge Thread {thread_id} is not attached to {bridge_project_id}"
+                )
+            binding = project_store.load_binding(bridge_project_id)
+            if not binding or binding.get("status") != "active":
+                raise BridgeError(
+                    f"Bridge Project {bridge_project_id} has no active ChatGPT Project binding"
+                )
+            project_report = project_store.verify(bridge_project_id)
+            if project_report["unsynced_source_count"]:
+                raise BridgeError(
+                    "Project Sources are not synchronized: "
+                    f"{project_report['unsynced_source_count']} source record(s) "
+                    "are pending, stale, failed, or missing"
+                )
+            remote_project_id = args.remote_project_id.strip()
+            if not remote_project_id:
+                raise BridgeError(
+                    "Project-bound capture requires the visibly observed --remote-project-id"
+                )
+            if remote_project_id != binding.get("remote_project_id"):
+                raise BridgeError(
+                    f"Observed ChatGPT Project {remote_project_id} does not match "
+                    f"the binding {binding.get('remote_project_id')}"
+                )
+            if not observed_workspace or not observed_account_label:
+                raise BridgeError(
+                    "Project-bound capture requires observed workspace and account labels"
+                )
+            if observed_workspace != binding.get("workspace"):
+                raise BridgeError(
+                    f"Observed workspace {observed_workspace!r} does not match "
+                    f"the binding {binding.get('workspace')!r}"
+                )
+            if observed_account_label != binding.get("account_label"):
+                raise BridgeError(
+                    f"Observed account {observed_account_label!r} does not match "
+                    f"the binding {binding.get('account_label')!r}"
+                )
+        elif (
+            args.remote_project_id
+            or observed_workspace
+            or observed_account_label
+        ):
+            raise BridgeError(
+                "Project observations require a Project-bound Bridge Thread"
+            )
         sessions_dir = bridge_dir / "gpt-pro-sessions"
         session_dir = sessions_dir / gpt_session_id
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -292,9 +401,57 @@ def main() -> int:
                 f"GPT Pro session {gpt_session_id} is already linked to Codex session "
                 f"{previous['codex_session_id']}"
             )
+        if previous.get("bridge_project_id") not in (
+            None,
+            "",
+            bridge_project_id,
+        ):
+            raise BridgeError(
+                f"GPT Pro session {gpt_session_id} belongs to "
+                f"{previous['bridge_project_id']}, not {bridge_project_id or 'standalone'}"
+            )
+        if previous.get("remote_project_id") not in (
+            None,
+            "",
+            remote_project_id,
+        ):
+            raise BridgeError(
+                f"GPT Pro session {gpt_session_id} belongs to ChatGPT Project "
+                f"{previous['remote_project_id']}, not {remote_project_id or 'standalone'}"
+            )
+        if previous.get("remote_project_workspace") not in (
+            None,
+            "",
+            observed_workspace,
+        ):
+            raise BridgeError(
+                f"GPT Pro session belongs to workspace "
+                f"{previous['remote_project_workspace']!r}, not "
+                f"{observed_workspace or 'standalone'!r}"
+            )
+        if previous.get("remote_account_label") not in (
+            None,
+            "",
+            observed_account_label,
+        ):
+            raise BridgeError(
+                f"GPT Pro session belongs to account "
+                f"{previous['remote_account_label']!r}, not "
+                f"{observed_account_label or 'standalone'!r}"
+            )
         web_url = validate_web_url(args.web_url or previous.get("web_conversation_url", ""))
         if not web_url:
             raise BridgeError("--web-url is required when creating a GPT Pro session")
+        if bridge_project_id:
+            project_segment = project_segment_from_conversation_url(web_url)
+            if not project_segment or (
+                project_segment != remote_project_id
+                and not project_segment.startswith(remote_project_id + "-")
+            ):
+                raise BridgeError(
+                    "Project-bound conversation URL must belong to the bound "
+                    f"ChatGPT Project {remote_project_id}"
+                )
         if previous.get("web_conversation_url") not in (None, "", web_url):
             raise BridgeError("A GPT Pro session cannot be rebound to another web conversation URL")
 
@@ -332,6 +489,10 @@ def main() -> int:
             json.dumps(
                 {
                     "thread_id": thread_id,
+                    "bridge_project_id": bridge_project_id,
+                    "remote_project_id": remote_project_id,
+                    "observed_workspace": observed_workspace,
+                    "observed_account_label": observed_account_label,
                     "gpt_session_id": gpt_session_id,
                     "web_url": web_url,
                     "prompt": prompt,
@@ -343,7 +504,9 @@ def main() -> int:
                     "attachment_name": attachment_name,
                     "attachment_verification": attachment_verification,
                     "upload_control": args.upload_control.strip(),
-                    "submitted_at": submitted_at,
+                    # An inferred capture time is not stable across retries. Callers can
+                    # pass an observed submission time to distinguish identical rounds.
+                    "submitted_at": submitted_at if args.submitted_at.strip() else "",
                     "generation_observed_at": generation_observed_at,
                     "response_completed_at": response_completed_at,
                 },
@@ -373,6 +536,10 @@ def main() -> int:
                         number=number,
                         title=title,
                         thread_id=thread_id,
+                        bridge_project_id=bridge_project_id,
+                        remote_project_id=remote_project_id,
+                        observed_workspace=observed_workspace,
+                        observed_account_label=observed_account_label,
                         gpt_session_id=gpt_session_id,
                         codex_session_id=codex_session_id,
                         web_url=web_url,
@@ -407,6 +574,10 @@ def main() -> int:
                 {
                     "gpt_pro_session_id": gpt_session_id,
                     "bridge_thread_id": thread_id,
+                    "bridge_project_id": bridge_project_id,
+                    "remote_project_id": remote_project_id,
+                    "remote_project_workspace": observed_workspace,
+                    "remote_account_label": observed_account_label,
                     "codex_session_id": codex_session_id,
                     "web_conversation_url": web_url,
                     "web_title": args.web_title or previous.get("web_title", "") or title,
@@ -418,6 +589,10 @@ def main() -> int:
                 ordered_keys=(
                     "gpt_pro_session_id",
                     "bridge_thread_id",
+                    "bridge_project_id",
+                    "remote_project_id",
+                    "remote_project_workspace",
+                    "remote_account_label",
                     "codex_session_id",
                     "web_conversation_url",
                     "web_title",
@@ -429,6 +604,10 @@ def main() -> int:
                 immutable_keys=(
                     "gpt_pro_session_id",
                     "bridge_thread_id",
+                    "bridge_project_id",
+                    "remote_project_id",
+                    "remote_project_workspace",
+                    "remote_account_label",
                     "codex_session_id",
                     "web_conversation_url",
                     "created_at",
@@ -442,6 +621,7 @@ def main() -> int:
             event_type="gpt-exchange",
             actor="gpt-pro",
             thread_title=args.purpose or args.web_title or title,
+            bridge_project_id=bridge_project_id,
             codex_session_id=codex_session_id,
             gpt_pro_session_id=gpt_session_id,
             artifact={"kind": "gpt-pro-turn", "path": turn_rel, "sha256": file_sha256(turn_file)},
@@ -452,6 +632,9 @@ def main() -> int:
                 "bundle": bundle_path,
                 "bundle_sha256": bundle_sha256,
                 "web_title": args.web_title or previous.get("web_title", "") or title,
+                "remote_project_id": remote_project_id,
+                "observed_workspace": observed_workspace,
+                "observed_account_label": observed_account_label,
                 "requested_model": requested_model,
                 "selected_ui_label": selected_ui_label,
                 "model_verification": model_verification,
@@ -473,6 +656,7 @@ def main() -> int:
                 thread_id=thread_id,
                 gpt_pro_session_id=gpt_session_id,
                 codex_session_id=codex_session_id,
+                bridge_project_id=bridge_project_id,
                 turn_path=turn_file,
                 summary=summary,
                 verification=verification,

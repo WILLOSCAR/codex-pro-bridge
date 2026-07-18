@@ -335,10 +335,18 @@ def _format_value(value: Any) -> str:
 
 def _thread_metadata(thread_id: str, events: Sequence[Mapping[str, Any]]) -> Dict[str, str]:
     title = next((str(event.get("thread_title")) for event in events if event.get("thread_title")), thread_id)
+    project_ids = list(
+        dict.fromkeys(
+            str(event.get("bridge_project_id"))
+            for event in events
+            if event.get("bridge_project_id")
+        )
+    )
     codex_ids = list(dict.fromkeys(str(event.get("codex_session_id")) for event in events if event.get("codex_session_id")))
     gpt_ids = list(dict.fromkeys(str(event.get("gpt_pro_session_id")) for event in events if event.get("gpt_pro_session_id")))
     return {
         "bridge_thread_id": thread_id,
+        "bridge_project_id": ", ".join(project_ids),
         "title": title,
         "created_at": str(events[0].get("occurred_at", "")) if events else "",
         "last_used_at": str(events[-1].get("occurred_at", "")) if events else "",
@@ -366,6 +374,8 @@ def render_thread_markdown(thread_id: str, events: Sequence[Mapping[str, Any]]) 
             timeline.append(f"- Codex session: `{event['codex_session_id']}`")
         if event.get("gpt_pro_session_id"):
             timeline.append(f"- GPT Pro session: `{event['gpt_pro_session_id']}`")
+        if event.get("bridge_project_id"):
+            timeline.append(f"- Bridge project: `{event['bridge_project_id']}`")
         artifact = event.get("artifact")
         if artifact:
             timeline.append(f"- Artifact: {_format_value(artifact)}")
@@ -397,6 +407,7 @@ def _write_thread_index(bridge_dir: Path) -> None:
                 rows.append(
                     {
                         "bridge_thread_id": stem,
+                        "bridge_project_id": "",
                         "title": "INVALID LEDGER",
                         "created_at": "",
                         "last_used_at": "",
@@ -410,14 +421,15 @@ def _write_thread_index(bridge_dir: Path) -> None:
         lines = [
             "# Codex Pro Bridge Threads",
             "",
-            "| Bridge Thread | Title | Codex Sessions | GPT Pro Sessions | Events | Last Used | Latest Event | File |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| Bridge Thread | Project | Title | Codex Sessions | GPT Pro Sessions | Events | Last Used | Latest Event | File |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         for row in rows:
             escape = lambda value: (value or "-").replace("|", "\\|").replace("\n", " ")
             lines.append(
-                "| `{}` | {} | {} | {} | {} | {} | {} | [open]({}.md) |".format(
+                "| `{}` | `{}` | {} | {} | {} | {} | {} | {} | [open]({}.md) |".format(
                     escape(row["bridge_thread_id"]),
+                    escape(row["bridge_project_id"]),
                     escape(row["title"]),
                     escape(row["codex_session_ids"]),
                     escape(row["gpt_pro_session_ids"]),
@@ -437,6 +449,7 @@ def append_event(
     event_type: str,
     actor: str,
     thread_title: str = "",
+    bridge_project_id: str = "",
     codex_session_id: str = "",
     gpt_pro_session_id: str = "",
     artifact: Mapping[str, Any] | None = None,
@@ -446,6 +459,8 @@ def append_event(
 ) -> Dict[str, Any]:
     repo = repo.resolve()
     thread_id = validate_id(thread_id, "bridge thread id")
+    if bridge_project_id:
+        bridge_project_id = validate_id(bridge_project_id, "bridge project id")
     if codex_session_id:
         codex_session_id = validate_id(codex_session_id, "Codex session id")
     if gpt_pro_session_id:
@@ -462,6 +477,27 @@ def append_event(
                 jsonl_path,
                 "".join(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n" for event in events),
             )
+        existing_project_ids = {
+            str(event.get("bridge_project_id"))
+            for event in events
+            if event.get("bridge_project_id")
+        }
+        if len(existing_project_ids) > 1:
+            raise BridgeError(
+                f"Bridge Thread {thread_id} has conflicting Project identities"
+            )
+        if (
+            bridge_project_id
+            and existing_project_ids
+            and bridge_project_id not in existing_project_ids
+        ):
+            raise BridgeError(
+                f"Bridge Thread {thread_id} belongs to "
+                f"{next(iter(existing_project_ids))}, not {bridge_project_id}"
+            )
+        effective_project_id = bridge_project_id or (
+            next(iter(existing_project_ids)) if existing_project_ids else ""
+        )
         if dedupe_key:
             for event in events:
                 if event.get("dedupe_key") == dedupe_key:
@@ -483,6 +519,8 @@ def append_event(
             "data": dict(data or {}),
             "dedupe_key": dedupe_key,
         }
+        if effective_project_id:
+            event["bridge_project_id"] = effective_project_id
         with jsonl_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
@@ -572,6 +610,7 @@ def verify_thread_integrity(
     complete_rounds = 0
     artifact_count = 0
     bundle_count = 0
+    project_ids: set[str] = set()
 
     for index, event in enumerate(events, start=1):
         prefix = f"event {index}"
@@ -589,6 +628,13 @@ def verify_thread_integrity(
             raise BridgeError(f"{prefix}: unsupported schema version")
         if event.get("thread_id") != thread_id:
             raise BridgeError(f"{prefix}: thread id mismatch")
+        if event.get("bridge_project_id"):
+            project_id = validate_id(
+                str(event["bridge_project_id"]), "bridge project id"
+            )
+            project_ids.add(project_id)
+            if len(project_ids) > 1:
+                raise BridgeError(f"{prefix}: conflicting Bridge Project identity")
         event_id = str(event.get("event_id", ""))
         if not event_id or event_id in event_ids:
             raise BridgeError(f"{prefix}: missing or duplicate event id")
@@ -676,6 +722,7 @@ def verify_thread_integrity(
     return {
         "valid": True,
         "thread_id": thread_id,
+        "bridge_project_id": next(iter(project_ids)) if project_ids else "",
         "event_count": len(events),
         "complete_rounds": complete_rounds,
         "artifact_count": artifact_count,
@@ -695,14 +742,15 @@ def write_session_index(sessions_dir: Path, *, kind: str) -> None:
             lines = [
                 "# Codex Bridge Sessions",
                 "",
-                "| Codex Session | Bridge Thread | Title | Source | Last Used | Notes |",
-                "| --- | --- | --- | --- | --- | --- |",
+                "| Codex Session | Bridge Thread | Project | Title | Source | Last Used | Notes |",
+                "| --- | --- | --- | --- | --- | --- | --- |",
             ]
             for row in rows:
                 notes = row.get("notes_path", "")
                 link = f"[notes]({notes})" if notes else "-"
                 lines.append(
                     f"| `{escape(row.get('codex_session_id'))}` | `{escape(row.get('bridge_thread_id'))}` | "
+                    f"`{escape(row.get('bridge_project_id'))}` | "
                     f"{escape(row.get('title'))} | {escape(row.get('history_source'))} | "
                     f"{escape(row.get('last_used_at'))} | {link} |"
                 )
@@ -710,14 +758,16 @@ def write_session_index(sessions_dir: Path, *, kind: str) -> None:
             lines = [
                 "# GPT Pro Bridge Sessions",
                 "",
-                "| GPT Pro Session | Bridge Thread | Title | Purpose | Last Used | Latest Turn | URL |",
-                "| --- | --- | --- | --- | --- | --- | --- |",
+                "| GPT Pro Session | Bridge Thread | Project | Remote Project | Title | Purpose | Last Used | Latest Turn | URL |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
             ]
             for row in rows:
                 url = row.get("web_conversation_url", "")
                 link = f"[open]({url})" if url.startswith(("https://", "http://")) else "-"
                 lines.append(
                     f"| `{escape(row.get('gpt_pro_session_id'))}` | `{escape(row.get('bridge_thread_id'))}` | "
+                    f"`{escape(row.get('bridge_project_id'))}` | "
+                    f"`{escape(row.get('remote_project_id'))}` | "
                     f"{escape(row.get('web_title'))} | {escape(row.get('purpose'))} | "
                     f"{escape(row.get('last_used_at'))} | {escape(row.get('latest_turn'))} | {link} |"
                 )
@@ -737,6 +787,7 @@ def record_codex_verdict(
     thread_id: str,
     gpt_pro_session_id: str,
     codex_session_id: str,
+    bridge_project_id: str = "",
     turn_path: Path,
     summary: str,
     verification: str,
@@ -759,6 +810,20 @@ def record_codex_verdict(
     session_meta = parse_metadata(
         bridge_root(repo) / "gpt-pro-sessions" / gpt_pro_session_id / "session.md"
     )
+    bridge_project_id = (
+        bridge_project_id or session_meta.get("bridge_project_id", "")
+    )
+    if bridge_project_id:
+        bridge_project_id = validate_id(bridge_project_id, "bridge project id")
+    if session_meta.get("bridge_project_id") not in (
+        None,
+        "",
+        bridge_project_id,
+    ):
+        raise BridgeError(
+            f"GPT Pro session belongs to {session_meta['bridge_project_id']}, "
+            f"not {bridge_project_id}"
+        )
     if session_meta.get("bridge_thread_id") not in (None, "", thread_id):
         raise BridgeError(
             f"GPT Pro session {gpt_pro_session_id} is bound to "
@@ -816,6 +881,7 @@ def record_codex_verdict(
             "",
             "## Metadata",
             f"- Bridge Thread ID: `{thread_id}`",
+            f"- Bridge Project ID: `{bridge_project_id or '-'}`",
             f"- Codex Session ID: `{codex_session_id}`",
             f"- GPT Pro Session ID: `{gpt_pro_session_id}`",
             f"- GPT Pro Turn: `{repo_relative(turn_path, repo)}`",
@@ -856,6 +922,7 @@ def record_codex_verdict(
         event_type="codex-verdict",
         actor="codex",
         thread_title=session_meta.get("purpose", "") or session_meta.get("web_title", "") or thread_id,
+        bridge_project_id=bridge_project_id,
         codex_session_id=codex_session_id,
         gpt_pro_session_id=gpt_pro_session_id,
         artifact={"kind": "codex-verdict", "path": verdict_rel, "sha256": file_sha256(verdict_path)},

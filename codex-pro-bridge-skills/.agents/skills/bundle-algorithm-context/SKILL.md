@@ -11,16 +11,27 @@ Before writing bridge state, read the canonical protocol at [../gpt-pro-question
 
 ## Required flow
 
-1. Choose one `bridge-thread-id` and a review mode: `algorithm_review`, `experiment_analysis`, `paper_brainstorm`, `implementation_check`, or `general_question`.
-2. Inspect repository status, changed and untracked files, relevant architecture/docs, and the user's explicit focus paths.
-3. Create an immutable Codex notes snapshot with `scripts/prepare_codex_session_notes.py`.
-4. Choose repository context:
+1. Resolve the external route first with
+   `../gpt-pro-project-workspace/scripts/resolve_bridge_route.py` and pass the
+   Codex-decided `--external-reasoning` or `--local-only` intent. Use its
+   `bridge-thread-id` and optional `bridge-project-id`; do not invent a second
+   identity during bundling.
+2. Choose a review mode: `algorithm_review`, `experiment_analysis`,
+   `paper_brainstorm`, `implementation_check`, or `general_question`.
+3. Inspect repository status, changed and untracked files, relevant architecture/docs, and the user's explicit focus paths.
+4. Create an immutable Codex notes snapshot with
+   `scripts/prepare_codex_session_notes.py`. In Project mode, pass
+   `--bridge-project-id`.
+5. Choose repository context:
    - `auto` for the first evidence-heavy round. Pass important `--include` paths as required focus seeds; the builder closes definitely-local dependencies before adding breadth.
    - `explicit` for follow-ups; name every required file. Safe requested files such as `.mjs` must appear in the manifest or the build fails.
    - `none` for reasoning-only follow-ups; `--max-files 0` is valid.
-5. Run `scripts/build_algorithm_bundle.py`, normally with `--format zip`.
-6. Open the manifest and verify every supplied and omitted input, selection reason, dependency closure, repository label, mode-specific output contract, context budget, and safety warning.
-7. Upload only after the manifest matches the intended evidence scope.
+6. Run `scripts/build_algorithm_bundle.py`, normally with `--format zip`, and
+   pass the same Project ID when applicable. The builder adds a compact,
+   generated Project context file; it does not turn the bundle into a Project
+   Source.
+7. Open the manifest and verify every supplied and omitted input, selection reason, dependency closure, repository label, mode-specific output contract, context budget, and safety warning.
+8. Upload only after the manifest matches the intended evidence scope.
 
 Completion criterion: the artifact is new and immutable, its zip integrity check passes, no absolute local repository path appears in the manifest, every requested include is present or the build failed, the auto dependency closure is complete, and GPT Pro can distinguish supplied evidence from missing evidence.
 
@@ -39,3 +50,7 @@ Do not use file count as a completeness signal. Selection priority is: explicit 
 Do not resend code on every follow-up. Send current Codex notes and compact thread events, adding repository files only when they changed or GPT Pro needs to inspect them again.
 
 The local JSONL ledger remains complete. A bundle includes the latest 24 events and at most 20,000 thread-context characters by default. Bundle construction is not a timeline event; the artifact is recorded only when `save_bridge_turn.py` captures the exchange that actually used it.
+
+Project Sources and Task Bundles have different lifetimes. Synchronize stable,
+cross-conversation material through `$gpt-pro-project-workspace`; keep transient
+code, diffs, logs, and round-specific questions inside immutable Task Bundles.

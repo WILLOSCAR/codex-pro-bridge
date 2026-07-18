@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import glob
 import hashlib
 import os
@@ -34,7 +33,14 @@ from bridge_store import (  # noqa: E402
     timestamp_slug,
     validate_id,
 )
+from evidence_safety import (  # noqa: E402
+    DEFAULT_EXCLUDE_DIRS,
+    display_path,
+    is_excluded_by_name,
+    scan_for_secrets,
+)
 from evidence_graph import dependency_closure  # noqa: E402
+from project_store import BridgeProjectStore  # noqa: E402
 
 
 DEFAULT_INCLUDE_EXTS = {
@@ -50,24 +56,6 @@ STATIC_OR_BINARY_EXTS = {
     ".gz", ".bz2", ".xz", ".7z", ".mp4", ".mov", ".avi", ".mp3", ".wav",
     ".parquet", ".feather", ".arrow", ".pt", ".pth", ".ckpt", ".onnx", ".bin",
 }
-DEFAULT_EXCLUDE_DIRS = {
-    ".git", ".hg", ".svn", ".idea", ".vscode", "node_modules", "dist", "build",
-    "target", "out", "coverage", "__pycache__", ".pytest_cache", ".mypy_cache",
-    ".ruff_cache", ".tox", ".venv", "venv", "env", ".env", "site-packages", ".next",
-    ".turbo", ".codex", "wandb", "mlruns", "checkpoints", "outputs", "runs", "artifacts",
-    "data", "datasets",
-}
-SECRET_NAME_PATTERNS = [
-    "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", ".env*", "*.secret*",
-    "*credential*", "*credentials*", "*cookie*", "*cookies*", "*.sqlite", "*.db", ".npmrc",
-    ".pypirc", "netrc", ".netrc",
-]
-HIGH_CONFIDENCE_SECRET_PATTERNS = [
-    re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
-    re.compile(rb"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(rb"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
-    re.compile(rb"\bsk-[A-Za-z0-9_-]{32,}\b"),
-]
 ALGORITHM_HINTS = [
     "train", "trainer", "loss", "reward", "rm", "urm", "dpo", "ppo", "grpo", "opd",
     "eval", "evaluate", "metric", "judge", "dataset", "data", "label", "sampler", "sample",
@@ -176,21 +164,6 @@ def walk_files(root: Path) -> List[Path]:
     return files
 
 
-def display_path(path: Path, root: Path) -> str:
-    if is_within(path, root):
-        return path.resolve().relative_to(root.resolve()).as_posix()
-    return f"external:{path.name}"
-
-
-def is_excluded_by_name(path: Path, root: Path) -> bool:
-    visible = display_path(path, root)
-    parts = Path(visible.replace("external:", "")).parts
-    if any(part in DEFAULT_EXCLUDE_DIRS for part in parts):
-        return True
-    base = path.name
-    return any(fnmatch.fnmatch(base, pattern) or fnmatch.fnmatch(visible, pattern) for pattern in SECRET_NAME_PATTERNS)
-
-
 def is_candidate(path: Path, root: Path, include_logs: bool) -> bool:
     if is_excluded_by_name(path, root):
         return False
@@ -215,18 +188,6 @@ def read_text(path: Path, max_bytes: int) -> Tuple[str, bool]:
     data = path.read_bytes()
     truncated = len(data) > max_bytes
     return data[:max_bytes].decode("utf-8", errors="replace"), truncated
-
-
-def scan_for_secrets(paths: Iterable[Path], max_bytes: int) -> List[str]:
-    flagged: List[str] = []
-    for path in paths:
-        try:
-            data = path.read_bytes()[:max_bytes]
-        except OSError:
-            continue
-        if any(pattern.search(data) for pattern in HIGH_CONFIDENCE_SECRET_PATTERNS):
-            flagged.append(path.name)
-    return flagged
 
 
 def keywords_from_text(*texts: str) -> List[str]:
@@ -454,6 +415,11 @@ def main() -> int:
     parser.add_argument("--repo", default=".", help="Repository root.")
     parser.add_argument("--repo-label", default="", help="Safe label shown to GPT Pro; defaults to directory name.")
     parser.add_argument("--bridge-thread-id", required=True, help="Canonical task id.")
+    parser.add_argument(
+        "--bridge-project-id",
+        default="",
+        help="Optional parent Bridge Project. Defaults from the Codex session.",
+    )
     parser.add_argument("--codex-session-id", default="", help="Defaults to <bridge-thread-id>-codex.")
     parser.add_argument("--goal", required=True, help="User goal.")
     parser.add_argument("--question", default="", help="Question for GPT Pro.")
@@ -523,6 +489,39 @@ def main() -> int:
             raise BridgeError(
                 f"Codex session {codex_session_id} is bound to {bound_thread}, not {thread_id}"
             )
+        project_store = BridgeProjectStore(root)
+        bridge_project_id = (
+            args.bridge_project_id
+            or session_meta.get("bridge_project_id", "")
+            or project_store.project_for_thread(thread_id)
+        )
+        project_context = ""
+        if bridge_project_id:
+            bridge_project_id = project_store.resolve_project_id(bridge_project_id)
+            if session_meta.get("bridge_project_id") not in (
+                None,
+                "",
+                bridge_project_id,
+            ):
+                raise BridgeError(
+                    f"Codex session {codex_session_id} belongs to "
+                    f"{session_meta['bridge_project_id']}, not {bridge_project_id}"
+                )
+            if project_store.project_for_thread(thread_id) != bridge_project_id:
+                raise BridgeError(
+                    f"Bridge Thread {thread_id} is not attached to {bridge_project_id}"
+                )
+            project_report = project_store.verify(bridge_project_id)
+            if not project_report["active_binding"]:
+                raise BridgeError(
+                    f"Bridge Project {bridge_project_id} has no active ChatGPT Project binding"
+                )
+            if project_report["unsynced_source_count"]:
+                raise BridgeError(
+                    f"Bridge Project {bridge_project_id} has "
+                    f"{project_report['unsynced_source_count']} unsynced Project Sources"
+                )
+            project_context = project_store.compact_context(bridge_project_id)
 
         notes_arg = args.codex_session_notes or args.notes
         latest_snapshot = session_meta.get("latest_snapshot", "")
@@ -691,6 +690,7 @@ def main() -> int:
             f"- Repository context: `{args.repo_context}`",
             f"- Auto dependency closure: `{auto_context_status}`",
             f"- Bridge thread id: `{thread_id}`",
+            f"- Bridge project id: `{bridge_project_id or '-'}`",
             f"- Codex session id: `{codex_session_id}`",
         ]
         if git:
@@ -715,6 +715,13 @@ def main() -> int:
                 "",
                 "### Thread context",
                 "- `context/bridge-thread-context.md`",
+                "",
+                "### Project context",
+                (
+                    "- `context/bridge-project-context.md`"
+                    if project_context
+                    else "- Standalone task; no Bridge Project context."
+                ),
                 "",
                 "### Repository files",
             ]
@@ -770,6 +777,8 @@ def main() -> int:
                 + "\n## Compact Bridge Thread Context\n\n"
                 + thread_context
             )
+            if project_context:
+                full += "\n## Compact Bridge Project Context\n\n" + project_context
             for note in extra_notes:
                 full += f"\n## Extra Notes: {note.name}\n\n{note.read_text(encoding='utf-8')}\n"
             if len(full) > args.max_total_chars:
@@ -794,6 +803,11 @@ def main() -> int:
                     if notes_path.is_file():
                         archive.write(notes_path, "context/codex-session-notes.md")
                     archive.writestr("context/bridge-thread-context.md", thread_context.encode("utf-8"))
+                    if project_context:
+                        archive.writestr(
+                            "context/bridge-project-context.md",
+                            project_context.encode("utf-8"),
+                        )
                     archive.writestr("context/git-status.txt", (status or "<clean or unavailable>\n").encode())
                     archive.writestr("context/git-diff-stat.txt", (diff_stat or "<no diff stat or unavailable>\n").encode())
                     for note, name in extra_notes_archive_names(extra_notes):

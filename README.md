@@ -46,20 +46,26 @@ It is a local workflow layer made of Codex skills and helper scripts. It turns a
 
 The workflow is:
 
-1. Codex writes local notes for one concrete task.
-2. Codex builds a bundle with an explicit evidence boundary.
-3. GPT Pro reviews that scoped material in the web conversation.
-4. Codex saves the complete answer, summarizes it, and verifies actionable claims locally.
-5. The same task continues into implementation, experiments, or another focused review round.
+1. Codex routes the request to local work, a standalone review, or the
+   repository's bound ChatGPT Project.
+2. Codex writes local notes for one concrete task.
+3. Codex builds a bundle with an explicit evidence boundary.
+4. GPT Pro reviews that scoped material in the correct web conversation.
+5. Codex saves the complete answer, summarizes it, and verifies actionable claims locally.
+6. The same task continues into implementation, experiments, or another focused review round.
 
 ```mermaid
 sequenceDiagram
   participant C as Codex
-  participant G as GPT Pro
-  C->>C: Inspect repository and write task notes
+  participant B as Bridge
+  participant G as GPT Pro Web
+  C->>B: Resolve local, standalone, or Project route
+  B->>B: Verify binding and shared sources when Project-bound
+  B-->>C: Thread + conversation + evidence policy
+  C->>C: Inspect repository and write codex-snapshot
   C->>G: Evidence-bounded bundle + focused question
   G-->>C: External review
-  C->>C: Save, summarize, and verify the full answer
+  C->>C: Save gpt-exchange and record codex-verdict
   C->>C: Implement, experiment, or continue the same task
 ```
 
@@ -69,7 +75,81 @@ The goal is to make the loop reusable, auditable, and implementable. Codex remai
 
 Each task uses one bridge thread so the evidence, external review, local verdict, implementation, and later follow-ups remain connected.
 
-The bridge keeps three concerns separate:
+### Execution scopes
+
+The same task protocol supports three execution scopes:
+
+| Scope | Shape | Best for |
+| --- | --- | --- |
+| `local_only` | Codex works directly | Work that needs no external review |
+| `standalone` | One Bridge Thread and one GPT conversation | Small projects and one-off reviews |
+| `project` | One repository-bound Project with many task Threads | Long-running research with shared sources and several conversations |
+
+### Project mode
+
+Project mode is an optional layer above the original Bridge Thread workflow. It
+is useful when one repository has several durable tasks, several GPT
+conversations, and a set of background files that should be shared between
+them. Small projects can stay standalone.
+
+```mermaid
+flowchart TB
+  LR["Local repository"] --> BP["Bridge Project"]
+  BP ==>|verified one-to-one binding| CP["ChatGPT Project"]
+  BP --> PS["Project Sources<br/>stable shared context"]
+  BP --> T1["Bridge Thread A<br/>task identity"]
+  BP --> T2["Bridge Thread B<br/>task identity"]
+  T1 --> A1["Codex snapshots<br/>Task Bundles<br/>Codex verdicts"]
+  T2 --> A2["Codex snapshots<br/>Task Bundles<br/>Codex verdicts"]
+  T1 ==>|primary conversation| G1["GPT Conversation A"]
+  T2 ==>|primary conversation| G2["GPT Conversation B"]
+  PS -. shared with .-> G1
+  PS -. shared with .-> G2
+```
+
+The relationship is intentionally narrow: one local root has at most one Bridge
+Project, and one Bridge Project has at most one current ChatGPT Project
+binding. Titles are only display metadata; the bridge verifies the visible
+Project URL and ID together with the active account and workspace before
+Project routing becomes active.
+
+Project mode adds the following behavior:
+
+| Capability | Behavior |
+| --- | --- |
+| Verified Project binding | Bind an existing ChatGPT Project or create a new one, then verify its visible identity before use |
+| Automatic routing | Choose `local_only`, `standalone`, or `project`; block Project submission when the binding or shared sources need repair |
+| Shared Project Sources | Synchronize stable material such as a project brief, glossary, PRD, or durable decisions for use across Project conversations |
+| Safe source updates | Plan from a complete remote inventory, scan selected files, respect capacity, and modify only Bridge-managed versions |
+| Multiple tasks | Keep independent deliverables in independent Bridge Threads and GPT conversations while follow-up rounds reuse the current task |
+| Project lifecycle | Track task state and dependencies; attach older standalone Threads; archive, reactivate, unbind, or recover a missing binding without deleting remote content |
+| Local audit trail | Keep binding, source, task, and verification events in local append-only state rather than relying on browser memory |
+
+Project Sources and Task Bundles serve different jobs. Stable project context is
+shared through the ChatGPT Project. Diffs, logs, code slices, experiment
+results, and one-round questions remain inside immutable Task Bundles, so each
+review still has an exact evidence boundary.
+
+Source ownership is conservative. Existing remote files, instructions, and
+conversations are treated as user-managed. `read_only` never changes remote
+sources, `append_only` adds new Bridge versions while retaining older ones, and
+`managed` may replace an older Bridge-managed version only after the new one is
+visible. None of these modes permits automatic deletion of user-managed
+content.
+
+A conversation already bound to the current Bridge Thread is reused. Existing
+remote Project conversations remain external until the user explicitly adopts
+one; the bridge does not silently guess between unrelated chats or rebind a
+saved conversation URL.
+
+The Bridge Thread remains the task identity, so Project mode does not add a
+duplicate Workstream layer. Existing standalone history can be attached to a
+Project later without rewriting old events. Local Bridge state records IDs,
+digests, statuses, verified observations, and the review artifacts intentionally
+captured for the task. It does not store browser cookies, access tokens, or
+unrelated private web responses.
+
+Whatever the scope, the bridge keeps three concerns separate:
 
 - **Evidence construction:** build the smallest package that can support the decision.
 - **External reasoning:** ask a focused question against exactly that evidence.
@@ -131,11 +211,43 @@ Restart Codex or open a new task if an existing task does not discover the updat
 
 ```text
 Use $gpt-pro-question-window.
-Use bridge thread <repo>-<date>-<task> and ask GPT Pro:
+Route this task automatically and ask GPT Pro:
 <question>
 Capture the raw answer, verify it locally,
 and record a separate Codex verdict.
 ```
+
+The skill preserves the existing CLI-style workflow: it chooses a Thread and
+conversation automatically. It asks for intervention only when a Project must
+be created, bound, or repaired.
+
+### Bind a long-running Project
+
+```text
+Use $gpt-pro-project-workspace.
+Bind this repository to my existing ChatGPT Project,
+verify the visible Project/account identity,
+and plan stable Project Sources without deleting user-managed files.
+```
+
+This is normally a one-time setup. After the binding is active, ordinary
+external questions still begin with `$gpt-pro-question-window` or one of the
+specialized review skills. The router selects Project mode when the current
+repository and task already belong there.
+
+### Maintain a bound Project
+
+```text
+Use $gpt-pro-project-workspace.
+Inspect the current binding, tasks, and Project Sources.
+Refresh these stable sources:
+<files>
+Preview the plan first, and do not delete user-managed content.
+```
+
+The same skill can update task metadata, reconcile missing or stale sources,
+archive or reactivate the local Bridge Project, and repair a binding after the
+remote Project becomes visible again.
 
 ### Run the full algorithm or research loop
 
@@ -153,6 +265,7 @@ More examples are available in [examples/usage_prompts.md](codex-pro-bridge-skil
 
 | Skill | Purpose |
 | --- | --- |
+| `gpt-pro-project-workspace` | Bind, route, synchronize, inspect, and repair Project-aware work |
 | `gpt-pro-question-window` | Ask a normal question or continue an existing external review |
 | `bundle-algorithm-context` | Build a scoped evidence package for a source-backed round |
 | `gpt-pro-research-algorithm-reviewer` | Review algorithms, pipelines, experiments, and research claims |
@@ -163,24 +276,17 @@ More examples are available in [examples/usage_prompts.md](codex-pro-bridge-skil
 
 Use `$experiment-plan-generator` and `$implementation-consistency-checker` locally when outside reasoning is unnecessary.
 
-## Development
-
-```bash
-cd codex-pro-bridge-skills
-python3 -m unittest discover -s tests -v
-python3 tests/validate_skills.py
-```
-
 ## Documentation
 
 - [Workflow overview](codex-pro-bridge-skills/docs/WORKFLOW.md)
 - [Canonical bridge protocol](codex-pro-bridge-skills/.agents/skills/gpt-pro-question-window/references/bridge_protocol.md)
+- [Bridge Project protocol](codex-pro-bridge-skills/.agents/skills/gpt-pro-project-workspace/references/project_protocol.md)
 - [Evidence bundle schema](codex-pro-bridge-skills/.agents/skills/bundle-algorithm-context/references/bundle_schema.md)
 - [AGENTS.md integration snippet](codex-pro-bridge-skills/docs/AGENTS_APPEND_SNIPPET.md)
 
 ## Star History
 
-[![GitHub Stars](https://img.shields.io/github/stars/WILLOSCAR/codex-pro-bridge?style=flat-square&label=GitHub%20Stars)](https://www.star-history.com/#WILLOSCAR/codex-pro-bridge&Date)
+[![Star history chart](assets/star-history.svg)](https://www.star-history.com/?repos=WILLOSCAR%2Fcodex-pro-bridge&type=date&legend=top-left)
 
 ## Acknowledgements
 

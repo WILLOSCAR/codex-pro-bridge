@@ -2,12 +2,32 @@
 
 Read this reference when creating, resuming, persisting, or debugging a Codex Pro Bridge task.
 
+## Execution scopes
+
+Every request resolves to one scope before bridge state is written:
+
+1. `local_only`: Codex completes the task without ChatGPT.
+2. `standalone`: one Bridge Thread uses one task-scoped GPT conversation.
+3. `project`: one Bridge Thread belongs to the repository's Bridge Project and
+   uses a conversation inside its bound ChatGPT Project.
+
+`standalone` is a permanent first-class mode, not an incomplete Project setup.
+An existing standalone thread can later be attached to a Project without
+rewriting its earlier events.
+
 ## Canonical identity
 
-Expose one required identifier:
+Expose one required task identifier:
 
 ```text
 bridge_thread_id = <repo>-<date>-<short-task>
+```
+
+Project mode adds:
+
+```text
+bridge_project_id = <stable-local-project-id>
+remote_project_id = <observed-chatgpt-g-p-id>
 ```
 
 Derive endpoint session IDs unless an existing compatible session is explicitly named:
@@ -17,7 +37,13 @@ codex_session_id   = <bridge_thread_id>-codex
 gpt_pro_session_id = <bridge_thread_id>-gpt-pro
 ```
 
-Once created, a Codex or GPT Pro session cannot move to another bridge thread. A GPT Pro session also cannot move to another web conversation URL. A mismatch is an error, not a rename.
+One local repository has at most one Bridge Project, and one Bridge Project has
+at most one current ChatGPT Project binding. A Bridge Thread is the Project's
+task identity; do not add a parallel Workstream ID.
+
+Once created, a Codex or GPT Pro session cannot move to another bridge thread.
+A GPT Pro session also cannot move to another web conversation URL or remote
+Project. A mismatch is an error, not a rename.
 
 ## Canonical events
 
@@ -33,6 +59,17 @@ Bundle construction attempts are local intermediates. Do not add them to the tas
 
 ```text
 .codex/codex-pro-bridge/
+  projects/
+    index.md
+    <bridge-project-id>/
+      project.json             # local Project identity
+      remote-binding.json      # observed ChatGPT Project binding
+      activity.jsonl           # append-only Project audit ledger
+      overview.md              # derived Project and task view
+      PROJECT_BRIEF.md         # default stable shared source
+      sources/
+        manifest.json          # observed Project Source state
+        plans/                 # immutable upload/removal plans
   threads/
     index.md
     <bridge-thread-id>.jsonl   # canonical append-only ledger
@@ -52,13 +89,35 @@ Bundle construction attempts are local intermediates. Do not add them to the tas
   bundles/                     # immutable evidence artifacts
 ```
 
-The JSONL ledger is the single source of truth. Markdown timelines, sequence diagrams, and indexes are projections and may be regenerated. Older Markdown-only threads are imported into JSONL on their next write.
+Each thread JSONL ledger is the source of truth for its task history. Project
+identity, binding, source state, and task membership live in the Project files
+and activity ledger. Markdown timelines, overviews, sequence diagrams, and
+indexes are projections and may be regenerated. Older Markdown-only threads
+are imported into JSONL on their next write.
 
 Repository-local installation adds `.agents/` and `.codex/` to that repository's local `.git/info/exclude`. Keep bridge state local unless the user explicitly chooses to publish selected artifacts.
 
 All timestamps include a timezone. Event IDs are unique, and each event points to its parent event. Artifact records contain repository-relative paths and SHA-256 digests.
 
 ## Round lifecycle
+
+### 0. Resolve the route
+
+Preview a decision before creating notes or bundles:
+
+```bash
+python3 .agents/skills/gpt-pro-project-workspace/scripts/resolve_bridge_route.py \
+  --repo . \
+  --task "<decision or deliverable>" \
+  --external-reasoning
+```
+
+Codex substitutes `--local-only` when no external round is useful. For
+`local_only`, stop the external workflow. For a ready Project decision,
+rerun with `--apply` once to attach or reuse its Bridge Thread. If the decision
+requires confirmation, create, bind, or verify the Project first. Do not
+silently fall back to standalone when this repository already has a Bridge
+Project with a stale or unverified binding.
 
 ### 1. Snapshot
 
@@ -72,6 +131,9 @@ python3 .agents/skills/bundle-algorithm-context/scripts/prepare_codex_session_no
   --gpt-pro-question "<question>" \
   --summary-file /tmp/codex-summary.md
 ```
+
+In Project mode, add `--bridge-project-id <project-id>` to snapshot, bundle,
+exchange-capture, and verdict commands.
 
 Completion criterion: `notes.md`, an immutable snapshot, one `codex-snapshot` event, and the Codex session index all exist and agree on the same thread ID.
 
@@ -111,6 +173,12 @@ python3 .agents/skills/gpt-pro-question-window/scripts/check_browser_preflight.p
 
 Only click Send when this command succeeds. A subscription/account label does not establish the selected model. `极高` and `Pro` are distinct labels.
 
+For Project mode, also supply `--expected-project-id`,
+`--observed-project-id`, `--expected-workspace`, `--observed-workspace`,
+`--expected-account-label`, `--observed-account-label`, and
+`--binding-status active`. Expected values come from routing; observed values
+come from the visible destination, not from a same-titled sidebar item.
+
 ### 3. Exchange capture
 
 After the answer finishes, immediately capture the raw exchange:
@@ -135,6 +203,10 @@ python3 .agents/skills/gpt-pro-question-window/scripts/save_bridge_turn.py \
 ```
 
 Capture the raw answer even when the observed model is mismatched or unverified, but preserve that status and do not claim the answer came from Pro.
+
+For Project mode, also pass `--bridge-project-id <project-id>`,
+`--remote-project-id <g-p-id>`, `--observed-workspace <workspace>`, and
+`--observed-account-label <account-label>`.
 
 Completion criterion: a numbered immutable turn exists; its bundle digest matches the file sent; model and attachment provenance are recorded truthfully; the GPT Pro session remains bound to one thread and one ChatGPT URL; and one `gpt-exchange` event points to the turn.
 
@@ -169,6 +241,15 @@ python3 .agents/skills/gpt-pro-question-window/scripts/verify_bridge_thread.py \
 
 The verifier fails on broken parents, duplicate identities, unsafe or missing artifact paths, artifact or bundle hash mismatches, invalid ordering, and incomplete final rounds.
 
+Project mode also requires:
+
+```bash
+python3 .agents/skills/gpt-pro-project-workspace/scripts/verify_bridge_project.py \
+  --repo . \
+  --bridge-project-id <project-id> \
+  --require-active-binding
+```
+
 ## Evidence scope
 
 - Default to repository-contained paths.
@@ -187,6 +268,11 @@ The verifier fails on broken parents, duplicate identities, unsafe or missing ar
 
 Keep the full ledger local. Bundles use the latest 24 events and 20,000 characters by default. Increase either limit only when an older event is directly relevant.
 
+Project Sources are durable context shared across Project conversations. Task
+Bundles are immutable, round-scoped evidence. Do not upload volatile diffs and
+logs as Project Sources, and do not use Project Sources as a substitute for
+recording exactly what one review round saw.
+
 ## Browser route
 
 Prerequisite: install and enable the Codex Chrome extension. In this environment, use a US-region network node while downloading it from the Chrome Web Store. Then open `chrome://extensions/`, open the extension's **Details**, and enable **Allow access to file URLs**. Without this permission, the local bundle may not be attached.
@@ -196,8 +282,11 @@ Prerequisite: install and enable the Codex Chrome extension. In this environment
 3. Start the file-chooser wait before clicking the visible attachment button and visible upload menu item. Never directly click hidden `#upload-files`.
 4. Set the absolute bundle path and verify the attachment chip.
 5. Read the exact selected model label and run `check_browser_preflight.py`; do not send on mismatch.
-6. Use Computer Use only when Chrome cannot control a native or graphical UI boundary.
-7. For a dry run, remove the attachment and verify the composer is empty.
+6. In Project mode, open the saved Project URL and verify its visible ID,
+   account/workspace, and active local binding before creating or reusing a
+   conversation.
+7. Use Computer Use only when Chrome cannot control a native or graphical UI boundary.
+8. For a dry run, remove the attachment and verify the composer is empty.
 
 While generation remains visibly active, keep waiting without resubmission. Inspect every 30–60 seconds, provide a short progress update at least once per minute, and record only timestamps actually observed. On a stalled or failed state, capture diagnostics and stop instead of duplicating the request.
 

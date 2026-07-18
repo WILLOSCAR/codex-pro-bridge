@@ -4,9 +4,28 @@
 
 ```text
 Use $gpt-pro-question-window.
-Use bridge thread [bridge-thread-id] and ask GPT Pro:
+Route this task automatically and ask GPT Pro:
 [question]
 Capture the raw exchange, verify it locally, and record a separate Codex verdict.
+```
+
+## Existing ChatGPT Project
+
+```text
+Use $gpt-pro-project-workspace.
+Bind this repository to my existing ChatGPT Project.
+Verify the exact visible Project ID, account, and workspace.
+Plan stable shared sources, but do not remove user-managed files.
+```
+
+## Project-aware question
+
+```text
+Use $gpt-pro-question-window.
+Ask GPT Pro inside this repository's bound Project:
+[question]
+Reuse an exact matching task when one exists; otherwise create a new Bridge
+Thread and Project conversation. Preserve the route and record both identities.
 ```
 
 ## Existing conversation
@@ -23,7 +42,7 @@ Use notes and compact events by default; add files only when they changed or nee
 
 ```text
 Use $gpt-pro-research-algorithm-reviewer.
-Use bridge thread [bridge-thread-id].
+Route the task automatically.
 Goal: [goal]
 Focus files: [optional repository paths]
 Decision needed: [go/no-go, experiment, implementation, or diagnosis]
@@ -34,7 +53,7 @@ After GPT Pro answers, verify every actionable claim against the repository and 
 
 ```text
 Use $gpt-pro-paper-brainstormer.
-Use bridge thread [bridge-thread-id] to evaluate:
+Route the task automatically and evaluate:
 [idea]
 Mark related-work names as unverified unless supported by supplied evidence or current research.
 ```
@@ -45,5 +64,7 @@ Mark related-work names as unverified unless supported by supplied evidence or c
 Use $gpt-pro-algorithm-pipeline.
 Run the full Codex -> GPT Pro -> Codex loop for:
 [task]
-Keep one bridge thread, send scoped evidence, preserve raw answers, record local verdicts, and implement only verified changes.
+Resolve local, standalone, or Project scope first. Keep one thread for the
+deliverable, send scoped evidence, preserve raw answers, record local verdicts,
+and implement only verified changes.
 ```

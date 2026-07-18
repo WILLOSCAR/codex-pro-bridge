@@ -27,6 +27,7 @@ from bridge_store import (  # noqa: E402
     write_bound_metadata,
     write_session_index,
 )
+from project_store import BridgeProjectStore  # noqa: E402
 
 
 def read_value(text: str, file_path: str) -> str:
@@ -47,6 +48,7 @@ def one_line(value: str, limit: int = 180) -> str:
 def build_notes(
     *,
     thread_id: str,
+    bridge_project_id: str,
     codex_session_id: str,
     title: str,
     goal: str,
@@ -67,6 +69,7 @@ def build_notes(
             "",
             "## Metadata",
             f"- Bridge Thread ID: `{thread_id}`",
+            f"- Bridge Project ID: `{bridge_project_id or '-'}`",
             f"- Codex Session ID: `{codex_session_id}`",
             f"- Title: {title}",
             f"- Created at: {created_at}",
@@ -97,6 +100,11 @@ def main() -> int:
     )
     parser.add_argument("--repo", default=".", help="Repository root.")
     parser.add_argument("--bridge-thread-id", required=True, help="Canonical task id.")
+    parser.add_argument(
+        "--bridge-project-id",
+        default="",
+        help="Optional parent Bridge Project. Existing standalone usage may omit it.",
+    )
     parser.add_argument("--codex-session-id", default="", help="Defaults to <bridge-thread-id>-codex.")
     parser.add_argument("--title", default="", help="Task title.")
     parser.add_argument("--goal", default="", help="User goal.")
@@ -141,6 +149,29 @@ def main() -> int:
                 f"Codex session {codex_session_id} is already bound to "
                 f"{previous['bridge_thread_id']}; refusing to move it to {thread_id}"
             )
+        project_store = BridgeProjectStore(repo)
+        bridge_project_id = (
+            args.bridge_project_id
+            or previous.get("bridge_project_id", "")
+            or project_store.project_for_thread(thread_id)
+        )
+        if bridge_project_id:
+            bridge_project_id = project_store.resolve_project_id(bridge_project_id)
+            if previous.get("bridge_project_id") not in (
+                None,
+                "",
+                bridge_project_id,
+            ):
+                raise BridgeError(
+                    f"Codex session {codex_session_id} belongs to "
+                    f"{previous['bridge_project_id']}, not {bridge_project_id}"
+                )
+            project_store.attach_thread(
+                bridge_project_id,
+                thread_id,
+                title=args.title or goal or thread_id,
+                goal=goal,
+            )
 
         now = now_iso()
         created_at = previous.get("created_at", "") or now
@@ -150,6 +181,7 @@ def main() -> int:
         )
         notes = build_notes(
             thread_id=thread_id,
+            bridge_project_id=bridge_project_id,
             codex_session_id=codex_session_id,
             title=title,
             goal=goal,
@@ -169,6 +201,7 @@ def main() -> int:
             {
                 "codex_session_id": codex_session_id,
                 "bridge_thread_id": thread_id,
+                "bridge_project_id": bridge_project_id,
                 "title": title,
                 "history_source": history_source,
                 "created_at": created_at,
@@ -179,6 +212,7 @@ def main() -> int:
             ordered_keys=(
                 "codex_session_id",
                 "bridge_thread_id",
+                "bridge_project_id",
                 "title",
                 "history_source",
                 "created_at",
@@ -186,7 +220,12 @@ def main() -> int:
                 "notes_path",
                 "latest_snapshot",
             ),
-            immutable_keys=("codex_session_id", "bridge_thread_id", "created_at"),
+            immutable_keys=(
+                "codex_session_id",
+                "bridge_thread_id",
+                "bridge_project_id",
+                "created_at",
+            ),
         )
         write_session_index(sessions_dir, kind="codex")
         snapshot_rel = repo_relative(snapshot_path, repo)
@@ -196,6 +235,7 @@ def main() -> int:
             event_type="codex-snapshot",
             actor="codex",
             thread_title=title,
+            bridge_project_id=bridge_project_id,
             codex_session_id=codex_session_id,
             artifact={
                 "kind": "codex-notes",

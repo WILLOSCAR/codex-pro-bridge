@@ -2,3 +2,13 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .codex/
+/docs/
+/CONTEXT.md
+/codex-pro-bridge-skills/tests/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
