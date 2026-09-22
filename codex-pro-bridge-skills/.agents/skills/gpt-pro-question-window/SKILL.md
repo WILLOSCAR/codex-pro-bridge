@@ -1,98 +1,133 @@
 ---
 name: gpt-pro-question-window
-description: Bridge Codex to the correct signed-in ChatGPT/GPT Pro conversation through a Chrome DevTools MCP-first browser route, automatically choosing standalone or a bound ChatGPT Project, with scoped upload, conversation reuse, raw answer capture, and later Codex verification. Use for normal GPT Pro questions and as the browser/persistence foundation for other Codex Pro Bridge skills; do not use for local tasks that need no external reasoning.
+description: Route a frozen Codex Pro question through the correct signed-in ChatGPT/GPT Pro conversation, using the specialized bridge_executor for bundle preparation, browser submission, unattended waiting, and raw capture; retain local verification in the main agent.
 ---
 
 # GPT Pro Question Window
 
-Use this skill as the browser and persistence adapter for Codex Pro Bridge.
+Use this skill only when outside reasoning is useful. It is the main-agent routing and
+verification adapter for Codex Pro Bridge; it is not the executor's step-by-step
+playbook.
 
-Before creating or resuming bridge state, read [references/bridge_protocol.md](references/bridge_protocol.md). It is the single source of truth for IDs, events, storage, invariants, and CLI commands.
+## Host runtime
 
-## Required flow
+Invoke every helper with one explicit Python 3.10+ interpreter appropriate to
+the host (`python` on Windows or `python3` on POSIX). Keep that interpreter
+consistent throughout one Bridge round instead of relying on script shebangs.
 
-1. Identify the exact question and desired output. Decide whether outside reasoning is useful, then preview the route with `../gpt-pro-project-workspace/scripts/resolve_bridge_route.py`, passing `--external-reasoning` or `--local-only`.
-2. If the route is `local_only`, stop using this skill and complete the work locally. If the route requires confirmation, resolve the binding or ambiguity before continuing. Apply a ready Project route once.
-3. Use the returned `bridge-thread-id`. Reuse the GPT Pro session only when its local metadata points to the intended web conversation, Bridge Thread, and ChatGPT Project. Otherwise create a new task-scoped conversation.
-4. For Project mode, open the exact saved Project URL and visibly verify the Project ID, account/workspace, active binding, and current source inventory before creating or reusing the conversation. Reconcile the observed inventory locally. Never choose by title alone.
-5. Resolve the browser and execution hosts using [references/browser_adapters.md](references/browser_adapters.md), then use Chrome DevTools MCP against the user's intended signed-in Chrome profile. Use the Codex Chrome connector only for its documented pre-submit compatibility fallback. Ask the user to handle remote-debugging permission, login, passwords, 2FA, CAPTCHA, rate limits, or account-security prompts.
-6. Upload a focused Task Bundle through that adapter when evidence is needed. A Task Bundle is not a Project Source. Never replace a failed upload with a full repository paste unless the user explicitly approves that fallback.
-7. Read the exact selected model label, visible attachment name, and Project identity when applicable. Acquire the repository-local advisory browser lease; before Send, record the stable conversation ID, existing turn IDs or cursor, and prompt digest as the pre-submit boundary. Run `scripts/check_browser_preflight.py`. If the requested model is `Pro`, labels such as `极高` or an account name containing “Pro” do not satisfy the gate.
-8. Click Send once. After ChatGPT visibly accepts the prompt, record the submission time and target turn ID when available, then release the browser lease immediately. Do not hold it while the remote model generates.
-9. Prefer Codex's native `read_thread` on that exact ChatGPT conversation. Match the new user turn after the saved boundary, pin its remote turn ID, and accept only its completed, untruncated assistant reply. Never capture whichever turn merely happens to be latest.
-10. If the native read is unavailable, ambiguous, or marked `truncated`, reacquire the browser lease only for a full browser capture of the already pinned target turn, pass the same remote turn ID to persistence, and release the lease afterward. A scheduled heartbeat may poll `read_thread`; it must stay quiet on no change and delete itself after capture, explicit failure, or timeout.
-11. Capture the prompt, bundle digest, full raw answer, target remote turn ID, capture route, Project identity, model labels, attachment name, upload route, and observed timing with `scripts/save_bridge_turn.py`.
-12. Re-open local evidence, verify the answer, and record the result separately with `scripts/record_codex_verdict.py`.
-13. Run `scripts/verify_bridge_thread.py --require-complete-rounds` and, for
-    Project mode, run
-    `../gpt-pro-project-workspace/scripts/verify_bridge_project.py` with
-    `--require-active-binding` before a follow-up round or final handoff.
-14. Report the chosen route, saved turn and verdict paths, useful conclusions, rejected claims, and next action.
+## Canonical contracts
 
-Completion criterion: the raw exchange and Codex verdict are separate immutable artifacts on the same thread, and every acted-on GPT Pro claim has a local verdict.
+Before creating or resuming Bridge state, read
+[bridge_protocol.md](references/bridge_protocol.md). Before an external browser round,
+read [browser_adapters.md](references/browser_adapters.md) and
+[attempt_recovery.md](references/attempt_recovery.md). When delegating the mechanical
+round, read [executor_handoff.md](references/executor_handoff.md) completely and pass
+its structured handoff to the global `bridge_executor` Agent.
 
-## Normal-question prompt
+The referenced documents and existing Python helpers are the sole owners of owner
+tokens, exact URLs, page observations, attempts, preflight, browser actions, capture,
+cleanup, and append-only ledger semantics. Do not copy those algorithms into this
+skill or into a custom prompt.
 
-For a normal question, read and use [references/question_window_prompt.md](references/question_window_prompt.md). Specialized review skills provide their own prompt.
+## Main-agent responsibilities
 
-## Browser upload
+1. Define the exact question, desired output, and whether external reasoning is useful.
+   Use `resolve_bridge_route.py` with `--external-reasoning` or `--local-only`. A
+   `local_only` result ends this route without spawning an Executor.
+2. Freeze the evidence decision and any explicit target Project URL. For a new round,
+   run `scripts/prepare_bridge_execution.py` with the question file, notes, frozen
+   context policy (`--context-policy explicit|auto|none`), model label/kind, thinking
+   intensity, and `--allow-send`. `explicit` requires repeated `--file`; `none` must
+   pass no `--file` and freezes `max_files = 0`; `auto` may use an empty focus list and
+   freezes a positive `--max-files` limit. Contradictory policy/file combinations fail
+   before any Project rebind.
+   The command reuses the Project store/router owners, performs an explicit target
+   rebind when requested, derives the canonical Thread ID, and atomically publishes
+   request plus `executor_handoff/v2`. Do not hand-write JSON, guess a Thread ID, or
+   create an isolated repository merely because the target differs from the current
+   binding.
+3. Use the receipt's handoff path and digest as the only Executor input. The request
+   contains the frozen goal/question/notes/files; model controls and Project target
+   live in v2 handoff. A business deadline may be supplied only when the parent/user
+   explicitly defines one; otherwise omit it or set it to null.
+4. Select exactly one execution mode and invoke the named `bridge_executor` Agent:
+   `prepare-and-run` for the published v2 handoff with explicit one-Send authorization,
+   or `recover-only` for an existing unresolved attempt. Do not split packaging and
+   browser ownership across agents.
+5. Keep the same Executor handle and use `wait_agent` for its completion, blocked,
+   failed, or continuation receipt. A wait timeout, unchanged page, or child runtime
+   limit is not task completion and does not authorize a new Agent, attempt, upload, or
+   Send. Continue the same handoff in `recover-only` as directed by its receipt. A
+   missing/null business deadline means there is no business termination time.
+6. After a `complete` receipt, reopen the immutable answer, bundle, ledger, and
+   checkpoint; verify hashes and the exact pinned turn. Record the separate Codex
+   verdict with `record_codex_verdict.py`, then run the thread/Project verifiers before
+   reporting conclusions. Never modify the raw Pro answer to add the verdict.
 
-Read [references/browser_adapters.md](references/browser_adapters.md) before attaching a file, crossing an SSH boundary, or performing browser fallback. Use Chrome DevTools MCP as the primary route. Use the Codex Chrome connector only when DevTools MCP is unavailable or fails before upload/Send while the composer remains empty. Both routes use visible semantic controls and the same browser lease.
+## Executor boundary
 
-Build the zip locally and keep its output path absolute. Record the successful route as `devtools-mcp-upload-file` or `codex-chrome-visible-menu`. Verify the exact filename or attachment chip before submission and remove it after a dry run.
+The Executor owns the mechanical round inside the frozen contract: request validation,
+bundle creation, manifest/ZIP checks, WSL/Windows staging and digest verification when
+an attachment is authorized, browser identity resolution, explicit target Project
+verification and complete Sources inventory observation, scoped upload, fresh preflight,
+one authorized Send, bootstrap promotion, exact-file cleanup, pinned-turn waiting, raw
+answer persistence, and release. On the Chrome DevTools route, the upload action is
+strictly one click on Add files, a fresh same-page snapshot, then direct `upload_file`
+on the fresh Upload from computer UID; never click that menu item or click Add files
+again after a missing chip. Use `scripts/validate_devtools_upload.py` to check the
+structured action plan, persist it under the handoff's expected output directory,
+normalize and persist its successful upload receipt, and pass both to browser preflight;
+a missing, failed, unknown, or stale receipt blocks before Send. Stop on its native chooser risk result. For
+`context_policy = none`, it passes
+`--repo-context none --max-files 0`, does not stage or upload a nonexistent/unauthorized
+attachment, does not create a bundle, and still may perform the authorized Send and
+capture. It must use the existing helpers and fail closed on identity, digest,
+authorization, or turn ambiguity.
 
-Before submission, run:
+For browser model controls, require one `model-controls/v1` transaction: one combined
+initial read, only mismatch-driven adjustments, and one combined final confirmation.
+Pass its receipt to preflight and never recheck controls after preflight or during
+recovery. A recovery owner/URL HOLD is an observation conflict, not proof of navigation;
+the Executor must not navigate or reload to repair it and may describe a transition only
+from direct same-page URL observations.
 
-```bash
-python3 .agents/skills/gpt-pro-question-window/scripts/check_browser_preflight.py \
-  --repo . \
-  --bridge-thread-id '<bridge-thread-id>' \
-  --browser-lease-token '<lease-token>' \
-  --requested-model Pro \
-  --selected-ui-label '<exact visible label>' \
-  --bundle /absolute/path/to/bundle.zip \
-  --attachment-name '<visible filename>' \
-  --upload-control '<observed-upload-route>' \
-  --expected-conversation-id '<reserved chat id>' \
-  --observed-conversation-id '<visible chat id>'
-```
+The connector fallback's `waitForEvent("filechooser")` plus menu-item click is a
+different route and must only be used after a qualifying pre-Send DevTools failure
+before any upload action/chooser; never mix it into the DevTools upload sequence.
 
-For a Project-bound round, also pass the exact values returned by routing and
-observed in the browser:
+The main agent retains the purpose, evidence scope, question text, Project decision,
+external-action authorization, interpretation of any error, scientific/engineering
+verification, and final verdict. The Executor must not choose materials, rewrite the
+question, adopt or summarize the answer, or put long answer text in its inter-agent
+receipt; it returns paths, hashes, identities, status, and concrete blockers only.
 
-```bash
-  --expected-project-id '<bound g-p-id>' \
-  --observed-project-id '<visible g-p-id>' \
-  --expected-workspace '<routed workspace>' \
-  --observed-workspace '<visible workspace>' \
-  --expected-account-label '<routed account label>' \
-  --observed-account-label '<visible account label>' \
-  --binding-status active
-```
+## Completion and failure semantics
 
-Use Computer Use only when neither browser route can control a required native or graphical UI boundary. An extension permission failure affects the connector fallback, not DevTools MCP.
+An external round is complete only when the raw exchange is saved as an immutable turn
+artifact on the intended Bridge Thread and the receipt includes the exact answer path,
+digest, remote turn ID, URL, capture route, and observed model metadata. A successful
+Send alone is not a completed review. A host wait window or runtime yield is not a web
+failure; preserve the attempt and continue with the same identity. A declared business
+deadline is handled as an actual deadline, not relabeled as a send failure. Unknown Send
+outcomes always remain non-resendable.
 
-Treat attachment preprocessing that stalls before submission as a bundle-shape problem: regenerate a smaller package or at most two or three focused attachments. Do not interrupt a response that remains visibly active merely because a Pro run is slow.
+Stop and report a concrete blocker for login, 2FA, CAPTCHA, remote-debugging permission,
+account-security prompts, rate limits, unavailable host/MCP capability, owner/URL/
+Project ambiguity, hash drift, stale observations, missing target turn, or incomplete
+or truncated answers. Do not switch to a new conversation or silently weaken a gate.
 
-## Browser pacing
+## Normal question
 
-- Prefer one conversation per Bridge Thread. Independent deliverables receive independent Threads and conversations; never use the same Bridge Thread concurrently.
-- Treat the signed-in Chrome machine as the browser host. SSH may move repository execution elsewhere, but the bundle must be staged and digest-verified on the browser host before `upload_file`; SSH reachability alone does not make a remote Codex process able to control local Chrome.
-- Serialize only browser-mutating critical sections regardless of adapter: attach/upload/preflight/Send and any browser fallback capture. Release the browser lease after each section; remote generations may overlap. Across repositories or worktrees, use one declared dispatcher until the lease is host-global.
-- Use bounded native reads for an immediate wait. If a later wake-up is useful, create one heartbeat watcher for the current task, retain its automation ID, and poll only the exact ChatGPT conversation. Delete the watcher on captured success, explicit failure, or timeout; do not resubmit.
-- Treat any `truncated: true`, incomplete status, missing target turn, or multiple plausible new turns as non-capturable. Reacquire the browser only when the full raw answer cannot be obtained natively.
-- Distinguish `submitted`, `generation observed`, `response complete`, `captured`, and `failed`. Record observed timestamps; do not invent missing ones.
-- If progress disappears, capture diagnostics and mark the attempt failed. Do not automatically resubmit the prompt.
-- Inspect after failure; avoid rapid retries, scraping, or burst submission.
-- Stop for service or account protections rather than attempting to bypass them.
+For ordinary questions, read [question_window_prompt.md](references/question_window_prompt.md)
+and place the final prompt in the frozen request's `question` field. Specialized review
+skills provide their own prompt; they still use this skill for route selection, the
+Executor handoff, capture, and final verification.
 
-## Non-negotiable checks
+## Scope boundary
 
-- Keep uploaded evidence inside the user-approved scope.
-- Save the answer before using it.
-- Verify locally before editing code or trusting a result.
-- Record model state as `verified`, `mismatch`, or `unverified`; never upgrade a mismatch to a Pro claim.
-- Verify ledger parents, artifact hashes, and bundle hashes before continuing the thread.
-- Never move an existing local session to another thread or web URL.
-- Never overwrite a saved bundle, turn, snapshot, or verdict.
-- Never expose a Chrome debugging endpoint on a public or shared interface.
+Task Bundles are immutable, round-scoped evidence and are not Project Sources. Keep
+Project Source changes in `gpt-pro-project-workspace`. Keep bundle selection logic in
+`bundle-algorithm-context`; this skill only consumes the already-frozen request. Keep
+the full raw exchange and local verdict separate. Use the Chrome DevTools route and the
+existing browser adapter's fallback only as its canonical contract permits; never open,
+close, or repurpose a browser tab outside that contract.

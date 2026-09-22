@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "topology": "wsl-windows",
+  "staging": {
+    "execution_root_env": "CODEX_BRIDGE_STAGING_EXECUTION_ROOT",
+    "browser_root_env": "CODEX_BRIDGE_STAGING_BROWSER_ROOT",
+    "lock_path_env": "CODEX_BRIDGE_STAGING_LOCK"
+  }
+}

@@ -1,0 +1,63 @@
+name: Python tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run unit tests
+        working-directory: codex-pro-bridge-skills
+        run: |
+          python -m unittest discover -s tests -p "test_*.py"
+          python -m unittest discover -s .agents/skills/gpt-pro-question-window/tests -p "test_*.py"
+          python -m unittest discover -s .agents/skills/gpt-pro-project-workspace/tests -p "test_*.py"
+          python .agents/skills/gpt-pro-question-window/scripts/test_prepare_review.py
+      - name: Compile Python sources
+        working-directory: codex-pro-bridge-skills
+        shell: bash
+        run: python -m compileall -q .agents/skills tests
+      - name: Smoke-test the PowerShell installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: codex-pro-bridge-skills
+        run: |
+          $env:CODEX_HOME = Join-Path $env:RUNNER_TEMP "codex-home"
+          ./install.ps1 -Global
+          if (-not (Test-Path (Join-Path $env:CODEX_HOME "skills\gpt-pro-question-window\SKILL.md"))) {
+            throw "Windows installer did not install gpt-pro-question-window"
+          }
+
+          $invalidRepo = Join-Path $env:RUNNER_TEMP "invalid-git-repo"
+          New-Item -ItemType Directory -Force -Path (Join-Path $invalidRepo ".git") | Out-Null
+          ./install.ps1 -Repo $invalidRepo
+          if (-not (Test-Path (Join-Path $invalidRepo ".agents\skills\gpt-pro-question-window\SKILL.md"))) {
+            throw "Repository-local install failed when .git was invalid"
+          }
+
+          $validRepo = Join-Path $env:RUNNER_TEMP "valid-git-repo"
+          New-Item -ItemType Directory -Force -Path $validRepo | Out-Null
+          git -C $validRepo init
+          ./install.ps1 -Repo $validRepo
+          $excludePath = git -C $validRepo rev-parse --path-format=absolute --git-path info/exclude
+          $exclude = Get-Content -LiteralPath $excludePath
+          if ($exclude -notcontains ".agents/" -or $exclude -notcontains ".codex/") {
+            throw "Repository-local install did not update Git exclude rules"
+          }

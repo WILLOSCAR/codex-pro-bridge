@@ -41,6 +41,13 @@ One local repository has at most one Bridge Project, and one Bridge Project has
 at most one current ChatGPT Project binding. A Bridge Thread is the Project's
 task identity; do not add a parallel Workstream ID.
 
+For a new Executor round, the parent freezes inputs with
+`scripts/prepare_bridge_execution.py`. This entry point is the owner of route/store
+composition: it derives the Thread ID, applies an explicitly requested Project rebind,
+and publishes an atomic request plus `executor_handoff/v2`. Callers must not supply a
+guessed Thread ID or hand-write a second request. Without an explicit target Project,
+the current local binding is reused and its existing verification gates remain active.
+
 Once created, a Codex or GPT Pro session cannot move to another bridge thread.
 A GPT Pro session also cannot move to another web conversation URL or remote
 Project. A mismatch is an error, not a rename.
@@ -87,6 +94,9 @@ Bundle construction attempts are local intermediates. Do not add them to the tas
       001-<slug>.md            # immutable raw exchange
       verdicts/                # immutable Codex verdicts
   bundles/                     # immutable evidence artifacts
+  executor-preparations/<thread>/
+                                # atomic request/handoff/receipt before Executor spawn
+  attempts/<thread>/<id>.json   # durable submission/wait checkpoint
 ```
 
 Each thread JSONL ledger is the source of truth for its task history. Project
@@ -106,7 +116,7 @@ All timestamps include a timezone. Event IDs are unique, and each event points t
 Preview a decision before creating notes or bundles:
 
 ```bash
-python3 .agents/skills/gpt-pro-project-workspace/scripts/resolve_bridge_route.py \
+python3 ${CODEX_HOME:-$HOME/.codex}/skills/gpt-pro-project-workspace/scripts/resolve_bridge_route.py \
   --repo . \
   --task "<decision or deliverable>" \
   --external-reasoning
@@ -130,15 +140,16 @@ sub-task, use standalone Review Probes instead of Project rounds. A probe never
 attaches to a Bridge Project, so it never consults Project source-sync and is
 never blocked when unrelated shared sources are stale. See
 [../../gpt-pro-review-probe/SKILL.md](../../gpt-pro-review-probe/SKILL.md). Many
-probes run in parallel because each is a distinct thread with its own ledger;
-only browser-mutating windows are serialized by the browser lease.
+probes run in parallel because each is a distinct thread with its own ledger
+and conversation-scoped browser claim; only the same conversation or shared
+Project mutation conflicts.
 
 ### 1. Snapshot
 
 Write current notes and an immutable snapshot:
 
 ```bash
-python3 .agents/skills/bundle-algorithm-context/scripts/prepare_codex_session_notes.py \
+python3 ${CODEX_HOME:-$HOME/.codex}/skills/bundle-algorithm-context/scripts/prepare_codex_session_notes.py \
   --repo . \
   --bridge-thread-id <thread-id> \
   --goal "<goal>" \
@@ -156,7 +167,7 @@ Completion criterion: `notes.md`, an immutable snapshot, one `codex-snapshot` ev
 Build a new artifact. Existing output files are never overwritten:
 
 ```bash
-python3 .agents/skills/bundle-algorithm-context/scripts/build_algorithm_bundle.py \
+python3 ${CODEX_HOME:-$HOME/.codex}/skills/bundle-algorithm-context/scripts/build_algorithm_bundle.py \
   --repo . \
   --bridge-thread-id <thread-id> \
   --goal "<goal>" \
@@ -174,57 +185,95 @@ For `auto`, use any `--include` paths as required focus seeds, close their defin
 
 ### 2.5 Browser preflight
 
-After the visible attachment chip and exact selected model label are observable, gate submission:
+An existing chat acquires a host-local conversation claim and verifies its exact
+conversation URL. A new Project chat acquires `--scope project --bootstrap`; a
+new standalone chat acquires `--scope profile --bootstrap`. Bootstrap returns a
+tab owner token but creates no durable conversation binding yet. Pass the full
+`list_pages` result to `resolve-tab`, then read `sessionStorage` only on requested
+pageIds and resolve again. It alone counts matches and permits a canonical new
+tab only while unbound and no matching owner/home exists. After an owner write,
+resolve again; only an observed claim owner records `tab_bound`. Owner mismatch,
+missing bound owner, duplicate owner, and wrong owner URL HOLD. A bootstrap owner
+on the same Project's `/c/<id>` is promotion-ready. Never use `localStorage`,
+unknown query/fragment bootstrap URLs, or `close_page`. For a bundle round, stage the
+bundle and upload only the returned G-drive Windows path. The Chrome DevTools upload
+sequence is one click on the visible Add files control, then a fresh same-page snapshot,
+then a direct `upload_file` call on the fresh **Upload from computer** menu-item UID;
+persist its frozen action plan and successful normalized result receipt beside the round
+artifacts. Never click that menu item first or click Add files again when a chip is missing.
 
-```bash
-python3 .agents/skills/gpt-pro-question-window/scripts/manage_browser_lease.py \
-  --repo . acquire \
-  --holder '<worker-id>' \
-  --bridge-thread-id '<thread-id>' \
-  --expected-conversation-id '<reserved chat id>'
+If `upload_file` fails/returns an unknown result or the attachment chip is absent, treat
+the state as possible native chooser residue on Windows: stop upload and Send, do not claim
+browser UI cleanup, and clean the exact G-drive staged file separately. A DevTools preflight
+also requires the persisted success receipt to bind the same plan, page, staged path, digest,
+filename, and chip; a missing, blocked, or stale receipt fails closed. The connector
+fallback's `waitForEvent("filechooser")` plus menu-item click is a different route and
+must not be mixed into the DevTools sequence.
 
-python3 .agents/skills/gpt-pro-question-window/scripts/check_browser_preflight.py \
-  --repo . \
-  --bridge-thread-id '<thread-id>' \
-  --browser-lease-token '<token returned above>' \
-  --requested-model Pro \
-  --selected-ui-label '<exact visible label>' \
-  --bundle /absolute/path/to/bundle.zip \
-  --attachment-name '<visible filename>' \
-  --upload-control '<observed-upload-route>' \
-  --expected-conversation-id '<reserved chat id>' \
-  --observed-conversation-id '<visible chat id>'
-```
+Project 首页的精确 `?tab=chats` 属于允许的展示参数。多个可用首页由 resolver 自动选择一页；
+已有唯一 owner 优先，其他页保持原样。候选 URL 总数与唯一 owner 数分别记录，重复同一 owner
+仍视为歧义。原始 MCP 格式转换与预检参数由 browser adapter 的统一观察入口负责。
 
-Only click Send when this command succeeds. A subscription/account label does not establish the selected model. `极高` and `Pro` are distinct labels.
+尚待永久绑定的 bootstrap 身份保存在宿主 registry 的 `pending_bootstraps` 中，独立于
+短期 lease。过期重领沿用原 owner 和 `tab_bound`；其他线程不能回收 pending owner。
+只有同页提升成功或经过清理核对的显式释放才退役该记录。旧 registry 中仍存在的 bootstrap
+lease 可在读取/重领时恢复该身份；已被旧代码丢弃的记录不能凭空重建。
 
-For Project mode, also supply `--expected-project-id`,
-`--observed-project-id`, `--expected-workspace`, `--observed-workspace`,
-`--expected-account-label`, `--observed-account-label`, and
-`--binding-status active`. Expected values come from routing; observed values
-come from the visible destination, not from a same-titled sidebar item.
+Legacy `chrome-default` and `chrome-devtools` registry rows alias to
+`chrome-stable-default` during lookup without rewriting history. An exact bound
+conversation may return `replace-legacy-owner-token` to consolidate its sole
+observed older token to the newest binding token; observing two compatible owner
+tokens at once is `duplicate-owner` and HOLDs.
+
+For `explicit`/`auto`, after the visible attachment and model controls appear, take a
+fresh snapshot on the same pageId and run `check_browser_preflight.py`. Existing chats pass both
+conversation IDs and their saved turn boundary. Bootstrap passes
+`--conversation-bootstrap`, leaves both conversation IDs empty, and uses the
+literal boundary `new-conversation`. Both paths pass exact host, URL, match-count,
+pageId, owner-token, model, attachment, and prompt SHA-256 observations.
+
+For `none`, no attachment is expected or staged; run the same fresh model, page, and
+prompt observations without requiring an attachment observation. The Send and capture
+gates remain unchanged.
+
+Only click Send when this command succeeds. Read the checked model item and
+thinking strength as separate observations. For a named model, use
+`--model-selection-kind exact`. For the dynamic `最新` choice, request and record
+that exact visible alias with `--model-selection-kind latest-alias`; this proves
+only that the alias was selected and must not be reported as verified Astra.
+Record the complete visible thinking-strength value, including its numeric level
+when present (for example `6 Pro`), and require an exact match. A strength or
+account label containing `Pro` does not establish the model. Project
+mode also supplies exact expected/observed Project, workspace, account, and
+active-binding values. Page title, sidebar position, and selected-page state are
+never identity.
+
+Treat model and thinking controls as one bounded pre-Send transaction: one combined
+initial read, only the actions required by a mismatch, and one combined final
+confirmation. Persist `model-controls/v1` and pass its validated receipt to browser
+preflight on the DevTools route. A successful preflight freezes these observations;
+waiting, promotion, recovery, and capture must not reopen or reconfirm the controls.
 
 ### 2.6 Submission handoff and response watcher
 
-Before Send, use the stable ChatGPT conversation ID exposed by Codex's native
-chat reference or the verified conversation URL. An `@`-mentioned chat supplies
-this identity; it is not a completion subscription. Titles are display
-metadata, not identity. When native reads are available, record the existing
-turn IDs or cursor as the pre-submit boundary and keep a digest of the exact
-prompt.
+For an existing chat, use the stable ChatGPT conversation ID exposed by Codex's
+native chat reference or the verified conversation URL before Send. An
+`@`-mentioned chat supplies this identity; it is not a completion subscription.
+Titles are display metadata, not identity. Record its existing turn IDs or cursor
+as the pre-submit boundary. Bootstrap instead records `new-conversation` and
+obtains the conversation ID only through post-Send promotion. Both paths keep a
+digest of the exact prompt.
 
-Acquire the repository-local advisory browser lease only for a browser-mutating critical
-section: open the exact chat, upload, preflight, and click Send once. Treat the
-submission as accepted only after the user message or generating state is
-visible. Record the observed submission time, then release the lease in all
-paths. Do not hold it while ChatGPT generates.
+Hold an existing conversation claim only through exact-tab discovery, the applicable
+upload (bundle rounds only), preflight, and one Send. For bootstrap, hold the broader claim after the first
+accepted Send until the same owner token and pageId expose exactly one new
+conversation URL. Take a fresh snapshot and run `promote-bootstrap`; it atomically
+narrows the live claim and creates the permanent Bridge Thread-to-conversation
+binding. Only then release with `send-accepted` and clean the exact staged file.
+If post-Send identity is missing or ambiguous, preserve the claim and do not
+resend. Do not hold a successfully promoted claim while ChatGPT generates.
 
-```bash
-python3 .agents/skills/gpt-pro-question-window/scripts/manage_browser_lease.py \
-  --repo . release --token '<token>'
-```
-
-Prefer the Codex-native `read_thread` tool for response retrieval:
+只有当前工具确实支持读取 ChatGPT 网页对话时才优先使用原生 `read_thread`；否则使用下面的浏览器读取路径：
 
 1. Read the exact ChatGPT conversation ID, never a same-titled chat.
 2. Identify the new user turn after the saved boundary and verify it against the
@@ -235,72 +284,62 @@ Prefer the Codex-native `read_thread` tool for response retrieval:
    `completed`, no error is present, and the returned assistant item is not
    marked `truncated`.
 4. If the native tool is unavailable, the target is ambiguous, or any required
-   item is truncated, reacquire a new browser lease, locate that already pinned
-   turn by ID and prompt fingerprint, and copy its full response from the
-   verified conversation. Pass the same remote turn ID to persistence and
-   release the new lease after capture or failure. Never substitute the page's
-   bottom-most response.
+   item is truncated, reacquire the same conversation claim, rediscover the tab
+   by durable owner token plus exact URL, require one unique matching tab,
+   obtain a fresh pageId/snapshot, and prove that the exact user-turn ID lies after the saved boundary and matches
+   the prompt SHA-256 before copying its pinned reply. Pass those tab
+   observations and the same remote turn ID to persistence, then release. Never
+   substitute the page's bottom-most response.
 
-`wait_threads` currently waits for Codex tasks, not ChatGPT chats. For a short
-wait, poll `read_thread` with bounded intervals. For a later wake-up, create one
-heartbeat automation attached to the current Codex task—not a standalone cron
-or worktree task—and retain the returned automation ID. Its durable prompt must
-contain the conversation ID, pre-submit boundary, prompt digest, deadline, and
-these terminal rules:
-
-- On no change, do not notify, resubmit, or modify Bridge state.
-- On a complete, untruncated target reply, capture it once, then delete the
-  automation before the single terminal notification.
-- On a complete but truncated target reply, the same watcher attempts the
-  browser fallback under a new lease. If the lease is temporarily busy before
-  the deadline, stay silent and retry later; do not create another watcher. On
-  fallback capture, delete the watcher. On deadline or a non-retryable browser
-  failure, record diagnostics, delete the watcher, and report once.
-- On an explicit remote failure or deadline expiry, delete the automation and
-  report the failure once; never create a duplicate watcher.
-
-On every terminal path, persist the capture or diagnostics before cleanup, then
-delete the watcher by its exact automation ID. If deletion is rejected, pause
-it immediately and report the cleanup failure only once. This fallback applies
-equally to native success, browser-fallback success, explicit failure, and
-timeout.
-
-The wait is transient state, not a fourth canonical event. Until the full raw
-answer is captured, do not append `gpt-exchange`. A failed or timed-out attempt
-therefore leaves an honestly incomplete round, and `--require-complete-rounds`
-must continue to fail.
+发送检查点、能力检测、等待及 watcher 登记的可执行流程统一见
+[attempt_recovery.md](attempt_recovery.md)。每轮在预检后创建 attempt，点击前保存
+`send-started`，用相同 owner 核对发送后固定的用户 turn。预检与恢复入口会拒绝对未解决发送的重试。
+仅有当前任务唤醒工具且实际登记成功时才使用后台 watcher；否则保持活跃线程有界读取。
+等待不产生第四种 canonical event；完整回答捕获前不能追加 `gpt-exchange`。
+明确失败或已到显式业务截止时间的轮次仍不完整，`--require-complete-rounds` 必须继续失败；
+仅等待批次、工具或宿主运行上限产生的 `pending` 必须续接同一 attempt，不能据此把网页轮次标为失败。
 
 ### 3. Exchange capture
 
 After the full answer is available, immediately capture the raw exchange:
 
 ```bash
-python3 .agents/skills/gpt-pro-question-window/scripts/save_bridge_turn.py \
+python3 ${CODEX_HOME:-$HOME/.codex}/skills/gpt-pro-question-window/scripts/save_bridge_turn.py \
   --repo . \
   --bridge-thread-id <thread-id> \
   --web-url https://chatgpt.com/c/... \
   --web-title "<observed title>" \
   --purpose "<task purpose>" \
   --bundle .codex/codex-pro-bridge/bundles/<bundle>.zip \
-  --requested-model Pro \
-  --selected-ui-label '<exact visible label>' \
+  --requested-model '最新' \
+  --selected-ui-label '最新' \
+  --model-selection-kind latest-alias \
+  --requested-thinking-intensity '6 Pro' \
+  --selected-thinking-intensity '6 Pro' \
   --attachment-name '<visible filename>' \
   --upload-control visible-menu \
   --submitted-at '<ISO-8601 with timezone>' \
   --generation-observed-at '<ISO-8601 with timezone>' \
   --response-completed-at '<ISO-8601 with timezone>' \
   --capture-route native-read-thread \
+  --answer-format native-raw \
+  --attempt-id '<attempt-id>' \
   --remote-turn-id '<matched completed turn id>' \
   --prompt-file /tmp/gpt-pro-prompt.md \
   --answer-file /tmp/gpt-pro-answer.md
 ```
 
-For native capture, omit the already released browser lease token. For browser
-fallback capture, pass `--capture-route browser-fallback` and the newly acquired
-`--browser-lease-token`, plus the same `--remote-turn-id`; release that lease
-after the command returns. Never save a truncated native item as the raw answer.
+For native capture, omit browser claim and tab observations. For browser
+fallback capture, pass `--capture-route browser-fallback`, the newly acquired
+claim token, exact page URL/id, fresh snapshot pageId, tab owner token, and the
+same remote turn ID. Capture the pinned reply through the visible Copy reply
+control and pass `--answer-format copied-markdown`; release afterward. If only
+plain text is available, pass `plain-text-degraded` and do not describe it as
+lossless. Never save a truncated native item as the raw answer.
 
-Capture the raw answer even when the observed model is mismatched or unverified, but preserve that status and do not claim the answer came from Pro.
+Capture the raw answer even when the observed model is mismatched, unverified,
+or selected through a dynamic alias. Preserve that status and do not claim an
+alias-selected answer came from Astra without separate exact model evidence.
 
 For Project mode, also pass `--bridge-project-id <project-id>`,
 `--remote-project-id <g-p-id>`, `--observed-workspace <workspace>`, and
@@ -313,7 +352,7 @@ Completion criterion: a numbered immutable turn exists; its bundle digest matche
 Verify the answer against local files, then record a separate verdict:
 
 ```bash
-python3 .agents/skills/gpt-pro-question-window/scripts/record_codex_verdict.py \
+python3 ${CODEX_HOME:-$HOME/.codex}/skills/gpt-pro-question-window/scripts/record_codex_verdict.py \
   --repo . \
   --bridge-thread-id <thread-id> \
   --turn .codex/codex-pro-bridge/gpt-pro-sessions/<session>/001-<slug>.md \
@@ -331,7 +370,7 @@ Completion criterion: an immutable verdict artifact and one `codex-verdict` even
 Before another round and before final handoff, verify the append-only chain and every referenced artifact:
 
 ```bash
-python3 .agents/skills/gpt-pro-question-window/scripts/verify_bridge_thread.py \
+python3 ${CODEX_HOME:-$HOME/.codex}/skills/gpt-pro-question-window/scripts/verify_bridge_thread.py \
   --repo . \
   --bridge-thread-id <thread-id> \
   --require-complete-rounds
@@ -342,7 +381,7 @@ The verifier fails on broken parents, duplicate identities, unsafe or missing ar
 Project mode also requires:
 
 ```bash
-python3 .agents/skills/gpt-pro-project-workspace/scripts/verify_bridge_project.py \
+python3 ${CODEX_HOME:-$HOME/.codex}/skills/gpt-pro-project-workspace/scripts/verify_bridge_project.py \
   --repo . \
   --bridge-project-id <project-id> \
   --require-active-binding
@@ -364,6 +403,14 @@ python3 .agents/skills/gpt-pro-project-workspace/scripts/verify_bridge_project.p
 - `explicit`: follow-up round; include only named changed or newly relevant files. Every requested safe file must be included unless the operator deliberately uses the incomplete-evidence override.
 - `none`: reasoning-only follow-up with notes and compact event context.
 
+The deterministic `prepare_bridge_execution.py` entry point freezes this policy in both
+the request and `executor_handoff/v2`. `explicit` requires at least one `--file`,
+`none` forbids every `--file` and freezes `--max-files 0`, while `auto` permits an
+empty focus list but freezes a positive `--max-files` limit. Contradictory inputs fail
+before an explicit Project rebind. A `none` handoff omits the
+`upload-task-bundle` action and does not create, stage, or upload an attachment; the
+Executor may still send and capture the authorized round.
+
 Keep the full ledger local. Bundles use the latest 24 events and 20,000 characters by default. Increase either limit only when an older event is directly relevant.
 
 Project Sources are durable context shared across Project conversations. Task
@@ -376,22 +423,33 @@ recording exactly what one review round saw.
 Read [browser_adapters.md](browser_adapters.md) and use Chrome DevTools MCP for each browser-mutating critical section. The Codex Chrome connector is a compatibility fallback only when DevTools MCP is unavailable or fails before upload/Send while the composer remains empty. The connector alone requires its extension and **Allow access to file URLs** permission.
 
 1. Use signed-in Chrome for ChatGPT/GPT Pro.
-2. Acquire the browser lease before destination selection, upload, preflight, or Send. The lease applies to every adapter.
-3. Select the exact conversation by stable URL/ID, then use a visible semantic upload control.
-4. Upload the absolute bundle path from the browser host and verify the exact attachment chip. Record `devtools-mcp-upload-file`, or `codex-chrome-visible-menu` only for an observed connector fallback, as the upload control.
-5. Read the exact selected model label and run `check_browser_preflight.py`; do not send on mismatch.
-6. In Project mode, open the saved Project URL and verify its visible ID,
-   account/workspace, and active local binding before creating or reusing a
-   conversation.
+2. Acquire a conversation claim for an existing chat, or a Project/profile bootstrap claim for a new chat.
+3. Pass the complete `list_pages` result to `resolve-tab`, read only requested owners, and follow only its action. Existing conversations require owner plus exact URL; only an unbound bootstrap `open-canonical-tab` action permits a new page. Never select by title or current page and never close pages.
+4. Stage with `manage_browser_staging.py`, upload only its G-drive Windows path through a visible control, and verify the exact attachment. On the DevTools route, persist both the frozen `devtools-upload/v1` action plan and the successful normalized upload receipt; a plan without its accepted receipt is not a valid preflight.
+5. Take a fresh same-page snapshot, read the exact model controls, and run `check_browser_preflight.py`; DevTools bundle rounds must pass both the repo-local action plan and its success receipt, while connector fallback rounds do not use those DevTools artifacts. Bootstrap uses `new-conversation` and no conversation ID.
+6. In Project mode, verify visible Project ID, account/workspace, and active binding.
 7. Use Computer Use only when neither browser route can control a native or graphical UI boundary.
-8. For a dry run, remove the attachment and verify the composer is empty.
+8. For a bootstrap dry run or pre-Send failure, remove the attachment, verify the composer is empty, clear only this claim's exact `sessionStorage` owner token, and release with exact-file cleanup plus the bootstrap cleanup attestation. If no prepare action reached a page, attest that the token was never bound.
 
-Release the browser lease after Send is visibly accepted. Observe the remote
-generation through the native response handoff above; do not resubmit. Reacquire
-the browser only for a required full-answer fallback, and record only timestamps
-actually observed. On a stalled or failed state, capture diagnostics and stop
-instead of duplicating the request.
+For bootstrap, promote the exact post-Send conversation URL before release.
+Release the claim and clean the staged file after Send is visibly accepted and,
+when applicable, promotion succeeds.
+Observe generation through the native response handoff; do not resubmit. After a
+reload, reacquire the same claim, rerun full-list `resolve-tab`, and run
+`check_browser_recovery.py` with the complete page/owner JSON and a fresh resolved pageId/snapshot. A bound bootstrap missing its owner HOLDs; a promotion-ready page promotes without resend. Reacquire only for a
+required full-answer fallback. On a stalled or failed state, capture diagnostics
+and stop instead of duplicating the request.
 
-If DevTools MCP fails before upload/Send and the composer remains empty, the connector may be tried once. A ChatGPT service rejection is not a browser-route failure. Stop for CAPTCHA, rate limits, abuse warnings, unusual login, passwords, 2FA, remote-debugging permission, or account-security prompts.
+An owner/URL HOLD is an observation conflict, not proof that the page returned to a
+Project home. Do not navigate or reload to make observations fit. Re-read the live URL
+and owner on the same pageId; state a navigation only when direct same-page observations
+prove the transition.
 
-The browser profile is host-local while the current advisory lease is repository-local. Across repositories, worktrees, or SSH execution hosts, use one declared dispatcher per browser host/profile until a host-global lease exists. Page IDs and independent MCP processes do not provide mutual exclusion. Keep MCP and Chrome on the same host by default; when repository execution is remote, stage and digest-verify the approved bundle on the browser host before upload. A remote Codex process cannot use `--autoConnect` to discover the operator's local Chrome.
+If DevTools MCP fails before any upload action/chooser and the composer remains empty, the connector may be tried once. Do not switch routes after `upload_file` has been invoked or its chip/chooser outcome is unknown. A ChatGPT service rejection is not a browser-route failure. Stop for CAPTCHA, rate limits, abuse warnings, unusual login, passwords, 2FA, remote-debugging permission, or account-security prompts.
+
+The browser registry is host-local across repositories/worktrees. Different
+conversation claims may coexist; the same conversation and shared Project
+mutations conflict. MCP page IDs remain instance-local and are always paired
+with exact URL plus durable tab owner token. Windows MCP and Chrome share the
+G-drive staging root; a remote Codex process cannot use `--autoConnect` to
+discover the operator's local Chrome.

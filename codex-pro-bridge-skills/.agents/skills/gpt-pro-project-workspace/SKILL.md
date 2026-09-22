@@ -5,6 +5,12 @@ description: Bind one local research repository to one existing or new ChatGPT P
 
 # GPT Pro Project Workspace
 
+## Host runtime
+
+Invoke every helper with one explicit Python 3.10+ interpreter appropriate to
+the host (`python` on Windows or `python3` on POSIX). Keep that interpreter
+consistent throughout one Bridge round instead of relying on script shebangs.
+
 Manage the optional Project layer above existing Bridge Threads. Read
 [references/project_protocol.md](references/project_protocol.md) before any
 binding, source synchronization, promotion, or repair.
@@ -24,20 +30,30 @@ binding, source synchronization, promotion, or repair.
 
 ## Automatic route
 
-Before an external round, Codex decides whether external reasoning is useful and
-runs `scripts/resolve_bridge_route.py` in preview mode. Codex passes
-`--external-reasoning` when a GPT Pro round is useful or `--local-only` when it
-will complete the task itself. This is an agent decision; the user does not
-choose a route manually.
+Before an external round, Codex decides whether external reasoning is useful. For a
+new Bridge Executor round, `gpt-pro-question-window/scripts/prepare_bridge_execution.py`
+is the parent-side entry point: it calls the route/store owners, freezes the context
+policy and materials, and publishes the canonical Thread ID plus handoff. Use
+`--context-policy none` with no evidence files for a reasoning-only round; it retains
+Send/capture authorization but does not authorize an attachment upload. Do not manually
+compose the request or call `resolve_bridge_route.py` only to manufacture a second
+Thread ID.
+Use `resolve_bridge_route.py` directly for a side-effect-free route preview or a
+local-only decision.
 
 Use `local_only` for work that Codex should complete directly. Use `standalone`
 for a one-off external review without a Project. Use `project` when the current
 repository has one active binding or the user explicitly requests shared
 Project context.
 
-Only rerun with `--apply` after the decision has no
-`requires_confirmation` entries. Report the chosen scope, Project, Thread,
-conversation policy, and reason in one concise line.
+The preparation entry point accepts an explicit target Project URL. That URL is the
+current call's authorization: it safely rebinds this repository through the existing
+store owner, archives the old local Sources manifest, and leaves the new inventory
+unverified until the Executor observes it. It must not create a temporary repository
+or block merely because the target differs from the previous binding. Without an
+explicit target, reuse the current binding and retain the existing stale/ambiguous
+gates. Report the chosen scope, Project, Thread, conversation policy, and reason in
+one concise line.
 
 If routing reports `sync-project-sources`, do not submit against stale shared
 context. Reconcile the selected Project Sources and preview the route again.
@@ -57,6 +73,15 @@ context. Reconcile the selected Project Sources and preview the route again.
 
 Binding is a local relationship. Unbinding must not delete the ChatGPT Project,
 its conversations, its instructions, or its files.
+
+用户明确切换到另一个 Project 时，优先由
+`prepare_bridge_execution.py --target-project-url ...` 调用现有 rebind owner；
+底层 `manage_bridge_project.py bind ... --rebind` 仍是修复/维护入口。两者都会原样
+归档旧 Sources manifest，并为新 Project 创建 `inventory_state=unverified` 的独立清单；
+其中空 `sources` 不表示远端没有文件。观察新 Project 的完整 inventory 后运行
+`reconcile_project_source_inventory.py`，核验成功才继续该项目的咨询。
+若在清单与绑定两次写入之间中断，用相同目标重试 `--rebind`；不要手工移动清单或放宽身份检查。
+同一 Project 的重新核验保留原清单，既有网页文件和对话不迁移、不删除。
 
 If the saved Project can no longer be opened, record that observation with
 `scripts/manage_bridge_project.py mark-binding-missing`. Do not silently unbind
@@ -136,13 +161,15 @@ conversation.
 Use Chrome DevTools MCP as the primary route using
 [`browser_adapters.md`](../gpt-pro-question-window/references/browser_adapters.md)
 and use visible semantic controls. Use the Codex Chrome connector only for the
-documented pre-submit compatibility fallback. Acquire the same browser lease before Project
-discovery mutations, source upload/removal, conversation creation, or instruction
-editing. None of these browser effects changes local identity until an observation
-is recorded by a script. Across repositories, worktrees, or SSH execution hosts
-that share one browser profile, use one declared dispatcher until the lease is
-host-global. Stage and digest-verify remote sources on the browser host before
-upload; SSH access does not make a remote absolute path uploadable by local Chrome.
+documented pre-submit compatibility fallback. Acquire a host-local
+`--scope project` claim before Project source upload/removal, conversation
+creation, instruction editing, or another shared Project mutation; it conflicts
+with active conversation claims in that Project. Normal task rounds use their
+own conversation claims and dedicated tab owner tokens, so different
+conversations may proceed in parallel. None of these browser effects changes
+local identity until a script records an observation. Stage every upload through
+the digest-verified G-drive browser-host adapter; SSH access does not make a
+remote absolute path uploadable by Windows Chrome.
 
 Do not store cookies, tokens, private web responses, or account credentials in
 Bridge state. Stop for login, 2FA, CAPTCHA, service protections, account
