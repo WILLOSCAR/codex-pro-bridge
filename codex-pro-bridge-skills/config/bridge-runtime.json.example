@@ -1,0 +1,23 @@
+{
+  "state_dir": "<absolute-private-runtime-state-directory>",
+  "allowed_repos": ["<absolute-authorized-repository-root>"],
+  "browser_command": ["<browser-host-MCP-executable>", "<argument>"],
+  "browser_env": {},
+  "browser_transport": "persistent",
+  "browser_connect_timeout_seconds": 300,
+  "browser_tool_timeout_seconds": 90,
+  "browser_profile": "chrome-stable-default",
+  "ui": {
+    "model": "<unique-visible-selected-model-label-selector>",
+    "thinking": "<unique-visible-thinking-value-selector>",
+    "workspace": "<unique-visible-active-workspace-label-selector>",
+    "account": "<unique-visible-active-account-label-selector>",
+    "composer": "#prompt-textarea",
+    "attachment_chip": "<composer-scoped-attachment-chip-selector>",
+    "model_menu_labels": ["<observed-model-menu-button-name>"],
+    "thinking_menu_labels": ["<observed-thinking-menu-button-name>"],
+    "attachment_labels": ["添加文件等", "Add photos & files"],
+    "upload_labels": ["从电脑上传", "Upload from computer"],
+    "send_labels": ["发送提示", "Send prompt", "Send"]
+  }
+}

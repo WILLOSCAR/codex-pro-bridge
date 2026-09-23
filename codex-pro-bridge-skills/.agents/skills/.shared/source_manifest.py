@@ -128,6 +128,16 @@ class ProjectSourceManager:
             or manifest.get("bridge_project_id") != project_id
         ):
             raise BridgeError("Project source manifest identity is invalid")
+        binding = self.store.load_binding(project_id)
+        if (
+            manifest
+            and binding
+            and binding.get("status") != "unbound"
+            and manifest.get("remote_project_id") != binding.get("remote_project_id")
+        ):
+            raise BridgeError(
+                "Project source manifest targets a different ChatGPT Project binding"
+            )
         return manifest
 
     def reconcile_remote_inventory(
@@ -191,6 +201,7 @@ class ProjectSourceManager:
             and all(status == "synced" for status in status_counts)
         )
         manifest["remote_inventory"] = normalized_inventory
+        manifest["inventory_state"] = "verified" if valid else "checked"
         manifest["last_inventory_checked_at"] = now
         if valid:
             manifest["last_inventory_verified_at"] = now
@@ -252,6 +263,14 @@ class ProjectSourceManager:
         capacity = max_project_files or int(binding.get("max_project_files", 0) or 0)
         roles = dict(source_roles or {})
         existing_manifest = self.load_manifest(project_id)
+        if (
+            existing_manifest.get("inventory_state") == "unverified"
+            and remote_inventory is None
+        ):
+            raise BridgeError(
+                "The rebound ChatGPT Project Sources have not been inventoried; "
+                "provide a complete observed remote inventory before planning"
+            )
         existing_sources = {
             str(item.get("source_id", "")): dict(item)
             for item in existing_manifest.get("sources", [])
@@ -473,6 +492,7 @@ class ProjectSourceManager:
             raise BridgeError(
                 "Recording Project Sources requires an active ChatGPT Project binding"
             )
+        self.load_manifest(project_id)
         if plan.get("remote_project_id") != binding.get("remote_project_id"):
             raise BridgeError(
                 "The Project Source plan targets an obsolete ChatGPT Project binding; "
@@ -602,18 +622,20 @@ class ProjectSourceManager:
                     "last_synced_at": now if status == "synced" else "",
                 }
             )
+        inventory_valid = all(source["sync_status"] == "synced" for source in sources)
         manifest = {
             "schema_version": PROJECT_SCHEMA_VERSION,
             "bridge_project_id": project_id,
             "remote_project_id": plan["remote_project_id"],
             "updated_at": now,
+            "inventory_state": "verified" if inventory_valid else "checked",
             "last_inventory_checked_at": now,
             "last_plan": repo_relative(plan_path, self.repo),
             "last_plan_sha256": file_sha256(plan_path),
             "sources": sources,
             "remote_inventory": remote_inventory,
         }
-        if all(source["sync_status"] == "synced" for source in sources):
+        if inventory_valid:
             manifest["last_inventory_verified_at"] = now
         _write_json(
             self.store.source_manifest_path(project_id), manifest

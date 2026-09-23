@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
@@ -79,6 +80,23 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
     )
 
 
+def _atomic_write_bytes(path: Path, value: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def _one_line(value: str, limit: int = 160) -> str:
     text = re.sub(r"\s+", " ", value or "").strip()
     if len(text) > limit:
@@ -138,6 +156,9 @@ class BridgeProjectStore:
 
     def source_plans_dir(self, project_id: str) -> Path:
         return self.sources_dir(project_id) / "plans"
+
+    def source_manifest_archive_dir(self, project_id: str) -> Path:
+        return self.sources_dir(project_id) / "archive"
 
     def list_project_ids(self) -> List[str]:
         if not self.projects_dir.exists():
@@ -442,6 +463,15 @@ class BridgeProjectStore:
             previous_remote == remote_project_id
             and previous.get("status") != "unbound"
         )
+        if previous_remote and previous_remote != remote_project_id:
+            self._prepare_source_manifest_rebind(
+                project_id,
+                previous_remote_project_id=previous_remote,
+                next_remote_project_id=remote_project_id,
+                occurred_at=now,
+            )
+        else:
+            self._validate_source_manifest_remote(project_id, previous_remote or remote_project_id)
         next_workspace = _one_line(
             workspace or (previous.get("workspace", "") if same_remote else ""), 160
         )
@@ -533,6 +563,115 @@ class BridgeProjectStore:
             )
         self._render_overview(project_id)
         return binding
+
+    def _validate_source_manifest_remote(
+        self, project_id: str, expected_remote_project_id: str
+    ) -> None:
+        manifest_path = self.source_manifest_path(project_id)
+        if not manifest_path.exists():
+            return
+        manifest = _read_json(manifest_path, default={})
+        if not isinstance(manifest, Mapping) or (
+            manifest.get("schema_version") != PROJECT_SCHEMA_VERSION
+            or manifest.get("bridge_project_id") != project_id
+        ):
+            raise BridgeError("Project source manifest identity is invalid")
+        if manifest.get("remote_project_id") != expected_remote_project_id:
+            raise BridgeError(
+                "Project source manifest targets a different ChatGPT Project binding"
+            )
+        if not isinstance(manifest.get("sources", []), list):
+            raise BridgeError("Project source manifest sources must be a list")
+
+    def _prepare_source_manifest_rebind(
+        self,
+        project_id: str,
+        *,
+        previous_remote_project_id: str,
+        next_remote_project_id: str,
+        occurred_at: str,
+    ) -> Dict[str, Any]:
+        """Archive the old source identity and stage an unverified new one.
+
+        The manifest is written before the binding.  A failure between those two
+        atomic writes therefore leaves an intentionally mixed identity that all
+        source operations reject.  Repeating the same rebind recognizes and
+        completes that exact pending transition.
+        """
+        manifest_path = self.source_manifest_path(project_id)
+        manifest_bytes = manifest_path.read_bytes() if manifest_path.exists() else b""
+        try:
+            manifest_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise BridgeError("Project source manifest is not valid UTF-8") from exc
+        manifest = _read_json(manifest_path, default={})
+        if manifest_path.exists() and (not isinstance(manifest, Mapping) or (
+            manifest.get("schema_version") != PROJECT_SCHEMA_VERSION
+            or manifest.get("bridge_project_id") != project_id
+        )):
+            raise BridgeError("Project source manifest identity is invalid")
+        if manifest_path.exists() and not isinstance(manifest.get("sources", []), list):
+            raise BridgeError("Project source manifest sources must be a list")
+
+        current_remote = str(manifest.get("remote_project_id", "")) if manifest else ""
+        if current_remote == next_remote_project_id:
+            transition = manifest.get("rebind_transition", {})
+            if not isinstance(transition, Mapping) or (
+                transition.get("from_remote_project_id") != previous_remote_project_id
+                or transition.get("to_remote_project_id") != next_remote_project_id
+                or manifest.get("inventory_state") != "unverified"
+                or manifest.get("sources") != []
+            ):
+                raise BridgeError(
+                    "Project source manifest already targets the requested binding "
+                    "without a valid pending rebind transition"
+                )
+            archive_path_text = str(transition.get("archived_manifest", ""))
+            archive_sha = str(transition.get("archived_manifest_sha256", ""))
+            if archive_path_text:
+                archive_path = resolve_repo_path(archive_path_text, self.repo)
+                if not archive_path.is_file() or file_sha256(archive_path) != archive_sha:
+                    raise BridgeError("Pending Project Source rebind archive is missing or changed")
+            return manifest
+
+        if manifest_path.exists() and current_remote != previous_remote_project_id:
+            raise BridgeError(
+                "Project source manifest targets neither the current nor requested "
+                "ChatGPT Project binding"
+            )
+
+        transition: Dict[str, Any] = {
+            "from_remote_project_id": previous_remote_project_id,
+            "to_remote_project_id": next_remote_project_id,
+            "started_at": occurred_at,
+        }
+        if manifest:
+            manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+            archive_path = self.source_manifest_archive_dir(project_id) / (
+                f"{previous_remote_project_id}--{manifest_sha}.manifest.json"
+            )
+            if archive_path.exists():
+                if archive_path.read_bytes() != manifest_bytes:
+                    raise BridgeError("Project Source manifest archive collision")
+            else:
+                _atomic_write_bytes(archive_path, manifest_bytes)
+            transition["archived_manifest"] = repo_relative(archive_path, self.repo)
+            transition["archived_manifest_sha256"] = manifest_sha
+
+        next_manifest = {
+            "schema_version": PROJECT_SCHEMA_VERSION,
+            "bridge_project_id": project_id,
+            "remote_project_id": next_remote_project_id,
+            "updated_at": occurred_at,
+            "inventory_state": "unverified",
+            "last_inventory_checked_at": "",
+            "last_inventory_verified_at": "",
+            "sources": [],
+            "remote_inventory": [],
+            "rebind_transition": transition,
+        }
+        _write_json(manifest_path, next_manifest)
+        return next_manifest
 
     def verify_remote_binding(
         self,
@@ -1148,13 +1287,17 @@ class BridgeProjectStore:
             if manifest
             else ""
         )
-        inventory_verified = bool(
-            not source_count
-            or (
+        if manifest and manifest.get("inventory_state") == "unverified":
+            inventory_verified = False
+        elif not source_count:
+            inventory_verified = True
+        elif manifest:
+            inventory_verified = bool(
                 last_inventory_checked_at
                 and last_inventory_verified_at == last_inventory_checked_at
             )
-        )
+        else:
+            inventory_verified = True
         return {
             "valid": True,
             "bridge_project_id": project_id,
@@ -1297,9 +1440,10 @@ class BridgeProjectStore:
         if tasks:
             for task in sorted(tasks.values(), key=lambda item: item["updated_at"], reverse=True):
                 dependencies = ", ".join(task["depends_on"]) or "-"
+                escaped_title = task["title"].replace("|", "\\|")
                 lines.append(
                     f"| `{task['bridge_thread_id']}` | `{task['status']}` | "
-                    f"{task['title'].replace('|', '\\|')} | {dependencies} |"
+                    f"{escaped_title} | {dependencies} |"
                 )
         else:
             lines.append("| _None_ | - | - | - |")

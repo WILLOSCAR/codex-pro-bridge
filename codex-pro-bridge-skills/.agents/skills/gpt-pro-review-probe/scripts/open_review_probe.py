@@ -5,16 +5,15 @@ A Review Probe is the fast lane for high-frequency, fine-grained, parallel
 review of a single idea, research proposal, or atomic sub-task. It is a
 standalone, single-round Bridge Thread that NEVER attaches to a Bridge Project,
 so it never consults Project source-sync and is never blocked when unrelated
-shared sources are stale. Many probes run in parallel because each is a distinct
-thread with its own ledger; only browser-mutating critical sections are
-serialized by the repository-local advisory browser lease. Separate worktrees
-still require one declared dispatcher.
+shared sources are stale. Many probes run in parallel because each has a distinct
+thread, conversation, ledger, and durable tab owner token. Host-local claims
+reject a second owner only for the same conversation.
 
 This orchestrator prepares the immutable Codex snapshot and builds the standalone
 evidence bundle. It deliberately does NOT import BridgeProjectStore and never
 runs source-sync. It stops before the browser step and prints the exact next
-handoff (lease -> preflight -> Send -> release -> native read -> capture) so the
-browser seam stays an explicit, verifiable human/agent action.
+handoff (claim -> stage -> preflight -> Send/cleanup -> native read -> capture)
+so the browser seam stays an explicit, verifiable human/agent action.
 """
 
 from __future__ import annotations
@@ -124,44 +123,61 @@ def main() -> int:
         bundle_cmd += ["--include", *args.include]
     bundle_path = run(bundle_cmd).splitlines()[-1].strip()
 
-    lease_script = QW_SCRIPTS / "manage_browser_lease.py"
+    claim_script = QW_SCRIPTS / "manage_browser_lease.py"
+    staging_script = QW_SCRIPTS / "manage_browser_staging.py"
     preflight_script = QW_SCRIPTS / "check_browser_preflight.py"
+    recovery_script = QW_SCRIPTS / "check_browser_recovery.py"
     save_script = QW_SCRIPTS / "save_bridge_turn.py"
 
     print(f"probe_thread_id: {thread_id}")
     print(f"codex_notes: {notes_path}")
     print(f"bundle: {bundle_path}")
     print()
-    print("Next (release the browser while ChatGPT generates):", file=sys.stderr)
-    print(f"  1. python3 {lease_script} --repo {repo} acquire \\", file=sys.stderr)
-    print(f"       --holder <worker-id> --bridge-thread-id {thread_id} \\", file=sys.stderr)
+    print("Next (different conversations may use separate owned tabs):", file=sys.stderr)
+    print(f"  1. If a reserved chat id exists, run {claim_script} --repo {repo} acquire", file=sys.stderr)
+    print(f"       --holder <unique-worker-id> --bridge-thread-id {thread_id} \\", file=sys.stderr)
     print("       --expected-conversation-id <reserved-chat-id>", file=sys.stderr)
-    print("     Use DevTools MCP as the primary route per", file=sys.stderr)
-    print("     gpt-pro-question-window/references/browser_adapters.md; use", file=sys.stderr)
-    print("     the Codex Chrome connector only for its pre-submit fallback.", file=sys.stderr)
-    print(f"  2. python3 {preflight_script} --repo {repo} \\", file=sys.stderr)
+    print("     Otherwise acquire the one-time new-chat bootstrap:", file=sys.stderr)
+    print(f"       python3 {claim_script} --repo {repo} acquire \\", file=sys.stderr)
+    print(f"       --holder <unique-worker-id> --bridge-thread-id {thread_id} \\", file=sys.stderr)
+    print("       --scope profile --bootstrap", file=sys.stderr)
+    print("     Bind the returned tab_owner_token only to that exact destination tab.", file=sys.stderr)
+    print(f"  2. python3 {staging_script} stage --source {bundle_path} \\", file=sys.stderr)
+    print(f"       --bridge-thread-id {thread_id}", file=sys.stderr)
+    print("     Upload only staged_windows_path through DevTools MCP.", file=sys.stderr)
+    print(f"  3. python3 {preflight_script} --repo {repo} \\", file=sys.stderr)
     print(f"       --bridge-thread-id {thread_id} --browser-lease-token <token> \\", file=sys.stderr)
-    print("       --requested-model Pro \\", file=sys.stderr)
-    print("       --selected-ui-label Pro --bundle <abs-bundle-path> \\", file=sys.stderr)
-    print("       --attachment-name <visible-name> --upload-control <observed-route> \\", file=sys.stderr)
-    print("       --expected-conversation-id <id> --observed-conversation-id <id>", file=sys.stderr)
-    print("  3. Before Send, record existing turn IDs/cursor and prompt digest.", file=sys.stderr)
-    print("     Click Send once; after acceptance, record submitted_at and the", file=sys.stderr)
-    print("     target turn ID when available. Do not wait in the browser.", file=sys.stderr)
-    print(f"  4. python3 {lease_script} --repo {repo} release --token <token>", file=sys.stderr)
-    print("  5. Poll the exact ChatGPT conversation with Codex read_thread; pin", file=sys.stderr)
-    print("     the matched completed, untruncated remote turn id.", file=sys.stderr)
+    print("       --source-bundle <source> --bundle <staged-wsl-path> \\", file=sys.stderr)
+    print("       --mcp-host-os windows --browser-host-os windows \\", file=sys.stderr)
+    print("       --mcp-temp-root '<configured-browser-staging-root>' \\", file=sys.stderr)
+    print("       --observed-page-url <url> --matching-page-count 1 \\", file=sys.stderr)
+    print("       --observed-page-id <id> \\", file=sys.stderr)
+    print("       --snapshot-page-id <id> --observed-tab-owner-token <owner> \\", file=sys.stderr)
+    print("       --requested-model <checked-item> --selected-ui-label <same-item> \\", file=sys.stderr)
+    print("       --model-selection-kind <exact-or-latest-alias> \\", file=sys.stderr)
+    print("       --requested-thinking-intensity <complete-visible-value> \\", file=sys.stderr)
+    print("       --selected-thinking-intensity <same-visible-value> \\", file=sys.stderr)
+    print("       --attachment-name <visible-name> --upload-control <route> \\", file=sys.stderr)
+    print("       [--expected-conversation-id <id> --observed-conversation-id <id> | \\", file=sys.stderr)
+    print("        --conversation-bootstrap] \\", file=sys.stderr)
+    print("       --pre-submit-boundary <cursor-or-turn-id-or-new-conversation> \\", file=sys.stderr)
+    print("       --prompt-sha256 <sha256>", file=sys.stderr)
+    print("  4. 按 attempt_recovery.md 保存预检/问题并创建 attempt；写入 send-started 后只发送一次。For bootstrap,", file=sys.stderr)
+    print(f"     run {claim_script} --repo {repo} promote-bootstrap with the same", file=sys.stderr)
+    print("     token/owner/page and exact post-Send conversation URL. Then release", file=sys.stderr)
+    print("     with --staged-path, --staged-sha256, and", file=sys.stderr)
+    print("     --terminal-state send-accepted. Do not retain the claim during generation.", file=sys.stderr)
+    print("  5. 用 manage_bridge_attempt.py wait-plan 选择当前可用的原生或浏览器读取；pin the", file=sys.stderr)
+    print("     matched completed, untruncated remote turn id.", file=sys.stderr)
     print(f"  6. python3 {save_script} --repo {repo} --bridge-thread-id {thread_id} \\", file=sys.stderr)
     print(f"       --standalone --single-round --bundle {bundle_path} \\", file=sys.stderr)
     print("       --web-url <conversation-url> --expected-conversation-id <id> \\", file=sys.stderr)
-    print("       --capture-route native-read-thread --remote-turn-id <turn-id> \\", file=sys.stderr)
-    print("       --requested-model Pro --selected-ui-label Pro \\", file=sys.stderr)
+    print("       --capture-route <actual-capture-route> --remote-turn-id <turn-id> \\", file=sys.stderr)
+    print("       --attempt-id <attempt-id> --response-completed-at <observed-ISO-8601> \\", file=sys.stderr)
     print("       --prompt-file <prompt> --answer-file <full-answer>", file=sys.stderr)
-    print("  7. If native output is unavailable, ambiguous, or truncated, acquire", file=sys.stderr)
-    print("     a new lease; locate the pinned turn, not the latest response; and", file=sys.stderr)
-    print("     capture with --capture-route browser-fallback,", file=sys.stderr)
-    print("     --remote-turn-id <same-turn-id>, and the new", file=sys.stderr)
-    print("     --browser-lease-token. Release that lease afterward.", file=sys.stderr)
+    print(f"  7. After reload, run {recovery_script} with fresh page/tab observations.", file=sys.stderr)
+    print("     For browser fallback, also pass those observations to save_bridge_turn;", file=sys.stderr)
+    print("     never capture or resend whichever turn merely appears latest.", file=sys.stderr)
     return 0
 
 

@@ -61,6 +61,13 @@ stale | account_mismatch | missing -> active after a correct visible verificatio
 
 Only `active` is eligible for automatic Project routing.
 
+显式更换远端 Project 时，旧来源清单按原始字节保存到
+`sources/archive/<old-remote-id>--<sha256>.manifest.json`。新清单的 `remote_project_id`
+指向新 Project，`inventory_state=unverified`，不会继承旧 Sources 或旧 inventory 的验证结果。
+其 `rebind_transition` 记录前后 Project ID 和旧清单摘要。实际完整 inventory 核验后才获得来源资格。
+清单先写、绑定后写；中间状态身份不一致时 source 操作和验证均失败，同目标 `bind --rebind`
+可以续完。对同一 Project 重新绑定不会重置清单，也不修改历史 Thread 的网页身份。
+
 `missing` means the previously bound Project could not be opened or observed.
 It preserves the remote identity for recovery. `unbound` means the local
 relationship was deliberately ended. Neither state deletes remote content.

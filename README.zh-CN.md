@@ -72,6 +72,25 @@ sequenceDiagram
 
 目标是让这条链路可复用、可审计、可实现。Codex 始终是事实源，GPT Pro 始终是外部 reviewer。
 
+### 稳定性与无人值守
+
+Bridge 将浏览器状态作为明确协议处理，而不是尽力而为的 UI 宏：
+
+| 能力 | 保证 |
+| --- | --- |
+| 标签页所有权与并行 | host-global 的 profile、Project 和 conversation claim 将一个 Bridge Thread 固定到一个 owned tab；互不相关的对话可以并行，且不关闭页面 |
+| 新建会话 | 从 Project/home bootstrap 首次成功 Send 后，立即提升到准确、稳定的 conversation URL |
+| 禁止重复发送 | durable attempt 记录 preflight、`send-started`、Send 接收状态和固定 remote turn；未知发送结果只能恢复，不能重发 |
+| 无人值守恢复 | wait plan 与 continuation receipt 在运行时让出后继续沿用同一 attempt，不把本地超时误当成任务结束 |
+| 上传安全 | `devtools-upload/v1` 只允许一次附件控件点击、一次新菜单快照和直接 `upload_file`；chooser 状态未知时 fail closed |
+| 模型控件 | `model-controls/v1` 将模型与思考强度分开核验，支持“最新”等动态标签，并限制读取和调整次数 |
+| 准确回答捕获 | 固定 remote turn 并保留 Copy reply 的 Markdown 结构；纯文本回退会明确标为降级捕获 |
+| Project 切换 | 显式 rebind 会归档旧 Sources manifest，任何变更前必须重新取得完整远端 inventory |
+| 确定性交接 | `executor_handoff/v2` 在浏览器工作前冻结问题、证据策略、目标、授权、模型控件、输出位置和摘要 |
+
+可选的 `bridge_executor` agent 负责打包、暂存、上传、等待和原始回答捕获，减少主代理上下文占用；证据选择和最终 verdict 仍归主代理。可移植模板位于
+[`agents/bridge-executor.toml.example`](codex-pro-bridge-skills/agents/bridge-executor.toml.example)。
+
 ## 工作方式
 
 每个任务使用一个 bridge thread，使证据、外部评审、本地 verdict、实现和后续 follow-up 保持在同一条任务链上。
@@ -200,7 +219,37 @@ Follow-up 通常只复用当前 Codex notes 和精简任务历史。只有文件
 ./codex-pro-bridge-skills/install.sh --repo /path/to/repo
 ```
 
+Windows PowerShell 同时支持全局安装和指定仓库安装：
+
+```powershell
+.\codex-pro-bridge-skills\install.ps1 -Global
+.\codex-pro-bridge-skills\install.ps1 -Repo C:\path\to\repo
+```
+
+Windows 原生运行，以及 WSL 侧 Codex 配合 Windows 侧 MCP/Chrome，均可按
+[`HOST_TOPOLOGIES.md`](codex-pro-bridge-skills/docs/HOST_TOPOLOGIES.md) 配置带
+SHA-256 校验的可选暂存拓扑。仓库中的示例只记录环境变量名；具体路径应保留在
+主机私有配置中。
+
+如需委派式无人值守执行，可将 agent 模板复制到
+`$CODEX_HOME/agents/bridge-executor.toml`（默认 `~/.codex/agents/`），并先检查其中的模型和 service tier。安装器不会覆盖已有 agent 配置。
+
 如果已有 Codex task 没有发现更新后的 skills，请重启 Codex 或新建 task。
+
+### 可选：程序化 MCP 执行器
+
+本分支包含完整 Bridge、Windows/WSL 安装与暂存适配，以及新的程序化运行时；
+可以独立 checkout 和安装，无需先应用其他 PR。已有专用 Agent 路线继续保留。
+
+程序化路线使用 `bridge_submit → bridge_wait → bridge_result`，由持久 worker 执行打包、
+上传、发送、等待和原文回收；主代理保留证据选择与最终核验。可选持久连接服务让不同 worker
+复用同一个已授权 DevTools 连接，减少重复启动和授权等待。
+
+按 [运行时配置说明](codex-pro-bridge-skills/.agents/skills/gpt-pro-question-window/references/mcp_runtime.md)
+填写私有配置；[示例](codex-pro-bridge-skills/config/bridge-runtime.json.example) 不含个人路径。
+Windows 原生使用 Windows Python、Node 和路径；WSL 路线使用 WSL Python 与 Windows MCP/Chrome，
+暂存映射仍按上述主机拓扑配置。两种方式均需自己的实际 UI profile、Chrome 登录与调试授权，
+安装器不会自动启用 MCP 或覆盖用户配置。当前适配器要求 DevTools 工具支持显式 `pageId`。
 
 ### 提一个普通问题
 

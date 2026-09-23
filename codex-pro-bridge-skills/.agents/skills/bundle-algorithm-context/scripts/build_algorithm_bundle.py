@@ -51,6 +51,8 @@ DEFAULT_INCLUDE_EXTS = {
     ".scala", ".kt", ".cpp", ".cc", ".c", ".h", ".hpp", ".cu", ".m", ".mm",
     ".swift", ".r", ".jl", ".log",
 }
+CODEX_NOTES_ARCHIVE_PATH = "context/codex-session-notes.md"
+README_ARCHIVE_PATH = "README_FOR_GPT_PRO.md"
 STATIC_OR_BINARY_EXTS = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".tar",
     ".gz", ".bz2", ".xz", ".7z", ".mp4", ".mov", ".avi", ".mp3", ".wav",
@@ -373,7 +375,8 @@ def markdown_code_fence(path: Path, content: str) -> str:
         "py": "python", "md": "markdown", "yml": "yaml", "jsonl": "json", "sh": "bash",
         "bash": "bash", "zsh": "bash", "ts": "typescript", "js": "javascript",
     }.get(extension, extension)
-    return f"```{language}\n{content.replace('```', '``\u200b`')}\n```"
+    escaped_content = content.replace("```", "``\u200b`")
+    return f"```{language}\n{escaped_content}\n```"
 
 
 def archive_name(path: Path, root: Path) -> str:
@@ -434,6 +437,8 @@ def main() -> int:
     parser.add_argument("--question", default="", help="Question for GPT Pro.")
     parser.add_argument("--mode", default="algorithm_review", choices=sorted(MODE_OUTPUTS))
     parser.add_argument("--repo-context", default="auto", choices=["auto", "explicit", "none"])
+    parser.add_argument("--git-context", default="full", choices=["full", "none"],
+                        help="Include Git metadata (legacy default), or omit it entirely. Does not change explicit file selection.")
     parser.add_argument("--include", nargs="*", default=[], help="Explicit repository files, directories, or globs.")
     parser.add_argument("--allow-external-include", action="store_true", help="Allow explicitly requested files outside the repo; archive paths remain anonymized.")
     parser.add_argument(
@@ -571,9 +576,9 @@ def main() -> int:
             raise BridgeError("; ".join(include_problems))
 
         git = is_git_repo(root)
-        status = filtered_git_status(root) if git else ""
-        diff_stat = git_diff_stat(root) if git else ""
-        changed = git_changed_paths(root) if git else set()
+        status = filtered_git_status(root) if git and args.git_context == "full" else ""
+        diff_stat = git_diff_stat(root) if git and args.git_context == "full" else ""
+        changed = git_changed_paths(root) if git and args.repo_context == "auto" else set()
         omitted: List[Tuple[str, str]] = [(problem, "explicitly allowed") for problem in include_problems]
         selected_reasons: dict[Path, str] = {}
         auto_context_status = "not-applicable"
@@ -729,7 +734,7 @@ def main() -> int:
                 "Separate observed facts from inference and state missing evidence explicitly.",
                 "",
                 "### Codex notes",
-                f"- `context/codex-session-notes.md`" if notes_path.is_file() else "- Missing by explicit override.",
+                f"- `{CODEX_NOTES_ARCHIVE_PATH}`" if notes_path.is_file() else "- Missing by explicit override.",
                 "",
                 "### Thread context",
                 "- `context/bridge-thread-context.md`",
@@ -760,12 +765,14 @@ def main() -> int:
                 "Files not listed above were not supplied. Secret/env files, credentials, cookies, "
                 "private keys, databases, raw data, vendor trees, and large artifacts are excluded by policy.",
                 "",
-                "## Git Status",
-                markdown_code_fence(Path("git-status.txt"), status or "<clean or unavailable>"),
-                "",
-                "## Git Diff Stat",
-                markdown_code_fence(Path("git-diff-stat.txt"), diff_stat or "<no diff stat or unavailable>"),
-                "",
+                *([
+                    "## Git Status",
+                    markdown_code_fence(Path("git-status.txt"), status or "<clean or unavailable>"),
+                    "",
+                    "## Git Diff Stat",
+                    markdown_code_fence(Path("git-diff-stat.txt"), diff_stat or "<no diff stat or unavailable>"),
+                    "",
+                ] if args.git_context == "full" else ["Git metadata omitted by explicit request.", ""]),
                 "## Supplied Source Files",
             ]
         )
@@ -815,19 +822,20 @@ def main() -> int:
             temp = out.with_name(f".{out.name}.{uuid.uuid4().hex}.tmp")
             try:
                 with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                    archive.writestr("README_FOR_GPT_PRO.md", manifest.encode("utf-8"))
+                    archive.writestr(README_ARCHIVE_PATH, manifest.encode("utf-8"))
                     for path in selected:
                         archive.write(path, archive_name(path, root))
                     if notes_path.is_file():
-                        archive.write(notes_path, "context/codex-session-notes.md")
+                        archive.write(notes_path, CODEX_NOTES_ARCHIVE_PATH)
                     archive.writestr("context/bridge-thread-context.md", thread_context.encode("utf-8"))
                     if project_context:
                         archive.writestr(
                             "context/bridge-project-context.md",
                             project_context.encode("utf-8"),
                         )
-                    archive.writestr("context/git-status.txt", (status or "<clean or unavailable>\n").encode())
-                    archive.writestr("context/git-diff-stat.txt", (diff_stat or "<no diff stat or unavailable>\n").encode())
+                    if args.git_context == "full":
+                        archive.writestr("context/git-status.txt", (status or "<clean or unavailable>\n").encode())
+                        archive.writestr("context/git-diff-stat.txt", (diff_stat or "<no diff stat or unavailable>\n").encode())
                     for note, name in extra_notes_archive_names(extra_notes):
                         archive.write(note, name)
                 with zipfile.ZipFile(temp) as archive:

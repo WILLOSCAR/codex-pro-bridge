@@ -12,14 +12,19 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-
 SHARED_DIR = Path(__file__).resolve().parents[2] / ".shared"
 sys.path.insert(0, str(SHARED_DIR))
 
-from bridge_store import (  # noqa: E402
+from bridge_attempts import (
+    active_attempt,
+    complete_attempt,
+    reserve_capture,
+    validate_capture,
+)
+from bridge_store import (
+    DEFAULT_BROWSER_PROFILE,
     BridgeError,
     append_event,
-    assert_browser_lease_held,
     atomic_write_text,
     bridge_root,
     default_codex_session_id,
@@ -36,7 +41,14 @@ from bridge_store import (  # noqa: E402
     write_bound_metadata,
     write_session_index,
 )
-from project_store import BridgeProjectStore  # noqa: E402
+from browser_identity import (
+    normalize_page_id,
+    resolve_owned_tab,
+    verify_claimed_tab,
+)
+from browser_observations import parse_json_observation
+from model_controls import MODEL_SELECTION_KINDS, assess_model_selection
+from project_store import BridgeProjectStore
 
 
 def read_value(text: str, file_path: str) -> str:
@@ -145,11 +157,17 @@ def build_turn(
     response_wait_seconds: int | None,
     requested_model: str,
     selected_ui_label: str,
+    model_selection_kind: str,
     model_verification: str,
+    requested_thinking_intensity: str,
+    selected_thinking_intensity: str,
+    thinking_intensity_verification: str,
     attachment_name: str,
     attachment_verification: str,
     upload_control: str,
     capture_route: str,
+    answer_format: str,
+    answer_sha256: str,
     remote_turn_id: str,
     saved_at: str,
     prompt: str,
@@ -178,11 +196,17 @@ def build_turn(
             f"- Capture Fingerprint: {capture_fingerprint}",
             f"- Requested Model: {requested_model or '-'}",
             f"- Selected UI Label: {selected_ui_label or '-'}",
+            f"- Model Selection Kind: {model_selection_kind}",
             f"- Model Verification: {model_verification}",
+            f"- Requested Thinking Intensity: {requested_thinking_intensity or '-'}",
+            f"- Selected Thinking Intensity: {selected_thinking_intensity or '-'}",
+            f"- Thinking Intensity Verification: {thinking_intensity_verification}",
             f"- Attachment Name: {attachment_name or '-'}",
             f"- Attachment Verification: {attachment_verification}",
             f"- Upload Control: {upload_control or '-'}",
             f"- Capture Route: {capture_route}",
+            f"- Answer Format: {answer_format}",
+            f"- Answer SHA-256: {answer_sha256}",
             f"- Remote Turn ID: {remote_turn_id or '-'}",
             f"- Submitted at: {submitted_at}",
             f"- Generation observed at: {generation_observed_at or '-'}",
@@ -245,10 +269,18 @@ def main() -> int:
         "--browser-lease-token",
         default="",
         help=(
-            "Optional token verified during a browser fallback capture. Omit for "
-            "native read_thread capture after the Send lease was released."
+            "Conversation-scoped claim token verified during browser fallback. "
+            "Omit for native read_thread capture after the Send claim was released."
         ),
     )
+    parser.add_argument("--browser-profile", default=DEFAULT_BROWSER_PROFILE)
+    parser.add_argument("--observed-page-url", default="")
+    parser.add_argument("--matching-page-count", type=int, default=0)
+    parser.add_argument("--pages-json", default="")
+    parser.add_argument("--owners-json", default="")
+    parser.add_argument("--observed-page-id", default="")
+    parser.add_argument("--snapshot-page-id", default="")
+    parser.add_argument("--observed-tab-owner-token", default="")
     parser.add_argument(
         "--remote-project-id",
         default="",
@@ -272,10 +304,23 @@ def main() -> int:
         help="Observed submission time as ISO-8601 with timezone.",
     )
     parser.add_argument("--generation-observed-at", default="", help="First observed generating state.")
+    parser.add_argument("--attempt-id", default="", help="Capture the pinned durable submission attempt")
     parser.add_argument("--response-completed-at", default="", help="Observed completed response time.")
     parser.add_argument("--requested-model", default="", help="Exact model label required by the task.")
-    parser.add_argument("--selected-ui-label", default="", help="Exact selected model label visible before submission.")
-    parser.add_argument("--attachment-name", default="", help="Attachment name visible in the composer before submission.")
+    parser.add_argument("--selected-ui-label", default="", help="Exact checked model label visible before submission.")
+    parser.add_argument(
+        "--model-selection-kind",
+        choices=MODEL_SELECTION_KINDS,
+        default="exact",
+        help="Use latest-alias when the checked UI item is a dynamic label such as 最新.",
+    )
+    parser.add_argument("--requested-thinking-intensity", default="", help="Exact thinking intensity required by the task.")
+    parser.add_argument("--selected-thinking-intensity", default="", help="Exact selected thinking intensity visible before submission.")
+    parser.add_argument(
+        "--attachment-name",
+        default="",
+        help="Attachment name visible in the composer; with --attempt-id it must match canonical preflight.",
+    )
     parser.add_argument("--upload-control", default="", help="Successful semantic upload route, for example visible-menu.")
     parser.add_argument(
         "--capture-route",
@@ -284,6 +329,15 @@ def main() -> int:
         help=(
             "Where the full raw answer was captured. browser is the compatible "
             "legacy path; browser-fallback requires a pinned turn and live new lease."
+        ),
+    )
+    parser.add_argument(
+        "--answer-format",
+        choices=("copied-markdown", "native-raw", "plain-text-degraded"),
+        default="",
+        help=(
+            "Serialization of the saved answer. Browser fallback should use "
+            "copied-markdown from ChatGPT's visible Copy reply control."
         ),
     )
     parser.add_argument(
@@ -321,10 +375,24 @@ def main() -> int:
         decision_trail = read_value(args.decision_trail, args.decision_trail_file)
         if not prompt or not answer:
             raise BridgeError("Both prompt and full GPT Pro answer are required")
+        pending_attempt = active_attempt(repo, thread_id)
+        attempt_id = args.attempt_id or (pending_attempt["attempt_id"] if pending_attempt else "")
+        attempt = None
+        if attempt_id:
+            prompt = Path(args.prompt_file).read_text(encoding="utf-8") if args.prompt_file else args.prompt
+            answer = Path(args.answer_file).read_text(encoding="utf-8") if args.answer_file else args.answer
+            attempt = validate_capture(repo, thread_id, attempt_id, prompt=prompt,
+                                       conversation_url=args.web_url,
+                                       remote_turn_id=args.remote_turn_id.strip())
+            if not args.response_completed_at or args.capture_route == "browser":
+                raise BridgeError("Attempt capture requires observed completion and a pinned native/browser-fallback route")
+            if args.submitted_at and attempt["submitted_at"] and args.submitted_at != attempt["submitted_at"]:
+                raise BridgeError("Capture submission time disagrees with checkpoint")
+            args.submitted_at = args.submitted_at or attempt["submitted_at"]
         if decision_trail and not verification:
             raise BridgeError("An immediate decision trail requires Codex verification")
         submitted_at = validate_timestamp(
-            args.submitted_at, "--submitted-at", default_now=True
+            args.submitted_at, "--submitted-at", default_now=not bool(attempt)
         )
         generation_observed_at = validate_timestamp(
             args.generation_observed_at, "--generation-observed-at"
@@ -349,11 +417,18 @@ def main() -> int:
         )
         requested_model = args.requested_model.strip()
         selected_ui_label = args.selected_ui_label.strip()
-        model_verification = (
+        model_verification = assess_model_selection(
+            requested_model, selected_ui_label, args.model_selection_kind
+        )
+        requested_thinking_intensity = args.requested_thinking_intensity.strip()
+        selected_thinking_intensity = args.selected_thinking_intensity.strip()
+        thinking_intensity_verification = (
             "verified"
-            if requested_model and selected_ui_label and requested_model == selected_ui_label
+            if requested_thinking_intensity
+            and selected_thinking_intensity
+            and requested_thinking_intensity == selected_thinking_intensity
             else "mismatch"
-            if requested_model and selected_ui_label
+            if requested_thinking_intensity and selected_thinking_intensity
             else "unverified"
         )
 
@@ -373,6 +448,17 @@ def main() -> int:
         if args.standalone and args.bridge_project_id:
             raise BridgeError("--standalone cannot be combined with --bridge-project-id")
         capture_route = args.capture_route
+        answer_format = args.answer_format or (
+            "native-raw" if capture_route == "native-read-thread" else "plain-text-degraded"
+        )
+        if capture_route == "native-read-thread" and answer_format != "native-raw":
+            raise BridgeError("Native read_thread capture requires --answer-format native-raw")
+        if capture_route == "browser-fallback" and not args.answer_format:
+            raise BridgeError(
+                "Browser fallback requires explicit --answer-format copied-markdown "
+                "or plain-text-degraded"
+            )
+        answer_sha256 = hashlib.sha256(answer.encode("utf-8")).hexdigest()
         remote_turn_id = args.remote_turn_id.strip()
         if remote_turn_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", remote_turn_id):
             raise BridgeError(
@@ -387,32 +473,92 @@ def main() -> int:
                 raise BridgeError(
                     f"--expected-conversation-id is required for {capture_route} capture"
                 )
+        browser_identity_args = (
+            args.observed_page_url,
+            args.matching_page_count,
+            args.observed_page_id,
+            args.snapshot_page_id,
+            args.observed_tab_owner_token,
+        )
         if capture_route == "native-read-thread":
-            if args.browser_lease_token:
-                raise BridgeError(
-                    "Native read_thread capture must omit the released browser lease token"
-                )
-        elif capture_route == "browser-fallback" and not args.browser_lease_token:
-            raise BridgeError(
-                "--browser-lease-token is required for --capture-route browser-fallback"
-            )
-        if args.browser_lease_token:
-            lease = assert_browser_lease_held(repo, token=args.browser_lease_token)
-            lease_thread_id = str(lease.get("thread_id", ""))
-            if lease_thread_id and lease_thread_id != thread_id:
-                raise BridgeError(
-                    f"Browser lease belongs to thread {lease_thread_id!r}, not {thread_id!r}"
-                )
-            lease_conversation_id = str(lease.get("expected_conversation_id", ""))
-            if lease_conversation_id and (
-                lease_conversation_id != args.expected_conversation_id.strip()
+            if (
+                args.browser_lease_token
+                or any(browser_identity_args)
+                or args.pages_json
+                or args.owners_json
             ):
                 raise BridgeError(
-                    "Browser lease conversation does not match --expected-conversation-id"
+                    "Native read_thread capture must omit browser claim and tab observations"
                 )
+        elif capture_route == "browser-fallback":
+            if not args.browser_lease_token or not all(browser_identity_args):
+                raise BridgeError(
+                    "Browser fallback requires claim token, page URL/id, fresh snapshot pageId, "
+                    "and tab owner token"
+                )
+            owner_selected_count = None
+            if bool(args.pages_json) != bool(args.owners_json):
+                raise BridgeError(
+                    "Browser fallback page and owner observations must be supplied together"
+                )
+            if args.pages_json:
+                pages = parse_json_observation(args.pages_json, "--pages-json")
+                owners = parse_json_observation(
+                    args.owners_json, "--owners-json", owners=True
+                )
+                resolved = resolve_owned_tab(
+                    repo,
+                    claim_token=args.browser_lease_token,
+                    thread_id=thread_id,
+                    browser_profile=args.browser_profile,
+                    expected_project_id=args.remote_project_id,
+                    pages=pages,
+                    owners=owners,
+                )
+                if resolved.get("action") != "reuse-owned-tab":
+                    raise BridgeError(
+                        f"Browser fallback tab resolution returned {resolved.get('action')!r} "
+                        f"({resolved.get('reason', 'no-reason')}); HOLD"
+                    )
+                if resolved.get("matching_page_count") != args.matching_page_count:
+                    raise BridgeError(
+                        "Browser fallback matching count disagrees with the complete page list"
+                    )
+                if (
+                    resolved.get("page_id") != normalize_page_id(args.observed_page_id)
+                    or resolved.get("url") != args.observed_page_url.strip()
+                ):
+                    raise BridgeError(
+                        "Browser fallback observations do not match the uniquely owned page"
+                    )
+                owner_selected_count = resolved.get("owner_selected_count")
+            verify_claimed_tab(
+                repo,
+                claim_token=args.browser_lease_token,
+                thread_id=thread_id,
+                browser_profile=args.browser_profile,
+                expected_project_id=args.remote_project_id,
+                expected_conversation_id=args.expected_conversation_id,
+                observed_page_url=args.observed_page_url,
+                matching_page_count=args.matching_page_count,
+                observed_page_id=args.observed_page_id,
+                snapshot_page_id=args.snapshot_page_id,
+                observed_tab_owner_token=args.observed_tab_owner_token,
+                owner_selected_count=owner_selected_count,
+            )
+        elif (
+            args.browser_lease_token
+            or any(browser_identity_args)
+            or args.pages_json
+            or args.owners_json
+        ):
+            raise BridgeError(
+                "Browser claim and tab observations are only accepted for browser-fallback capture"
+            )
         if args.single_round:
             prior_exchange = any(
-                event.get("event_type") == "gpt-exchange"
+                event.get("event_type") == "gpt-exchange" and
+                (not attempt_id or event.get("data", {}).get("attempt_id") != attempt_id)
                 for event in load_events(bridge_dir, thread_id)
             )
             if prior_exchange:
@@ -598,15 +744,81 @@ def main() -> int:
             bundle_path = repo_relative(bundle, repo)
             bundle_sha256 = file_sha256(bundle)
         attachment_name = args.attachment_name.strip()
-        attachment_verification = (
-            "verified"
-            if bundle_path and attachment_name == Path(bundle_path).name
-            else "mismatch"
-            if bundle_path and attachment_name
-            else "not-required"
-            if not bundle_path
-            else "unverified"
-        )
+        if attempt and bundle_path:
+            preflight = attempt.get("preflight", {})
+            if not isinstance(preflight, dict):
+                raise BridgeError("Attempt preflight is invalid")
+            staged = preflight.get("staged_bundle", {})
+            if not isinstance(staged, dict):
+                raise BridgeError("Attempt staged bundle provenance is invalid")
+            if preflight.get("attachment_verification") != "verified":
+                raise BridgeError(
+                    "Attempt preflight does not contain a verified attachment"
+                )
+            canonical_name = str(
+                preflight.get("attachment_name") or staged.get("attachment_name", "")
+            ).strip()
+            canonical_sha256 = str(
+                preflight.get("attachment_sha256") or staged.get("staged_sha256", "")
+            ).strip().lower()
+            staged_name = str(staged.get("attachment_name", "")).strip()
+            staged_sha256 = str(staged.get("staged_sha256", "")).strip().lower()
+            source_sha256 = str(staged.get("source_sha256", "")).strip().lower()
+            if (
+                not canonical_name
+                or not re.fullmatch(r"[0-9a-f]{64}", canonical_sha256)
+                or not staged_name
+                or not re.fullmatch(r"[0-9a-f]{64}", staged_sha256)
+                or not re.fullmatch(r"[0-9a-f]{64}", source_sha256)
+            ):
+                raise BridgeError(
+                    "Attempt preflight lacks the canonical attachment name and source/staged SHA-256"
+                )
+            if staged_name != canonical_name:
+                raise BridgeError(
+                    "Attempt preflight attachment name disagrees with staged verification"
+                )
+            if staged_sha256 != canonical_sha256:
+                raise BridgeError(
+                    "Attempt preflight attachment digest disagrees with staged verification"
+                )
+            if source_sha256 != canonical_sha256:
+                raise BridgeError(
+                    "Attempt preflight source digest disagrees with staged verification"
+                )
+            if attachment_name and attachment_name != canonical_name:
+                raise BridgeError(
+                    f"Captured attachment name {attachment_name!r} disagrees with the "
+                    f"canonical staged name {canonical_name!r}"
+                )
+            if bundle_sha256 != canonical_sha256:
+                raise BridgeError(
+                    "Captured bundle digest disagrees with the canonical staged attachment digest"
+                )
+            attachment_name = canonical_name
+            attachment_verification = "verified"
+        elif attempt:
+            preflight = attempt.get("preflight", {})
+            if not isinstance(preflight, dict):
+                raise BridgeError("Attempt preflight is invalid")
+            if preflight.get("attachment_verification") == "verified":
+                raise BridgeError(
+                    "Attempt preflight contains an attachment, so --bundle is required "
+                    "for digest verification"
+                )
+            if attachment_name:
+                raise BridgeError("--attachment-name requires --bundle for attempt capture")
+            attachment_verification = "not-required"
+        else:
+            attachment_verification = (
+                "verified"
+                if bundle_path and attachment_name == Path(bundle_path).name
+                else "mismatch"
+                if bundle_path and attachment_name
+                else "not-required"
+                if not bundle_path
+                else "unverified"
+            )
 
         title = one_line(args.turn_title or args.web_title or args.purpose or gpt_session_id, 120)
         capture_fingerprint = hashlib.sha256(
@@ -621,10 +833,16 @@ def main() -> int:
                     "web_url": web_url,
                     "prompt": prompt,
                     "answer": answer,
+                    "answer_format": answer_format,
+                    "answer_sha256": answer_sha256,
                     "bundle_sha256": bundle_sha256,
                     "requested_model": requested_model,
                     "selected_ui_label": selected_ui_label,
+                    "model_selection_kind": args.model_selection_kind,
                     "model_verification": model_verification,
+                    "requested_thinking_intensity": requested_thinking_intensity,
+                    "selected_thinking_intensity": selected_thinking_intensity,
+                    "thinking_intensity_verification": thinking_intensity_verification,
                     "attachment_name": attachment_name,
                     "attachment_verification": attachment_verification,
                     "upload_control": args.upload_control.strip(),
@@ -638,6 +856,15 @@ def main() -> int:
                 sort_keys=True,
             ).encode("utf-8")
         ).hexdigest()
+        if attempt:
+            # Retries after saving an exchange but before checkpoint completion reuse the same artifact.
+            capture_fingerprint = hashlib.sha256(json.dumps(
+                {"attempt_id": attempt_id, "thread_id": thread_id,
+                 "remote_turn_id": remote_turn_id, "prompt": prompt, "answer": answer,
+                 "answer_format": answer_format},
+                ensure_ascii=False, sort_keys=True,
+            ).encode("utf-8")).hexdigest()
+            reserve_capture(repo, thread_id, attempt_id, capture_fingerprint)
         with file_lock(session_dir / ".session.lock"):
             turn_file = next(
                 (
@@ -677,11 +904,17 @@ def main() -> int:
                         response_wait_seconds=response_wait_seconds,
                         requested_model=requested_model,
                         selected_ui_label=selected_ui_label,
+                        model_selection_kind=args.model_selection_kind,
                         model_verification=model_verification,
+                        requested_thinking_intensity=requested_thinking_intensity,
+                        selected_thinking_intensity=selected_thinking_intensity,
+                        thinking_intensity_verification=thinking_intensity_verification,
                         attachment_name=attachment_name,
                         attachment_verification=attachment_verification,
                         upload_control=args.upload_control.strip(),
                         capture_route=capture_route,
+                        answer_format=answer_format,
+                        answer_sha256=answer_sha256,
                         remote_turn_id=remote_turn_id,
                         saved_at=saved_at,
                         prompt=prompt,
@@ -763,12 +996,20 @@ def main() -> int:
                 "observed_account_label": observed_account_label,
                 "requested_model": requested_model,
                 "selected_ui_label": selected_ui_label,
+                "model_selection_kind": args.model_selection_kind,
                 "model_verification": model_verification,
+                "requested_thinking_intensity": requested_thinking_intensity,
+                "selected_thinking_intensity": selected_thinking_intensity,
+                "thinking_intensity_verification": thinking_intensity_verification,
                 "attachment_name": attachment_name,
                 "attachment_verification": attachment_verification,
                 "upload_control": args.upload_control.strip(),
                 "capture_route": capture_route,
+                "answer_format": answer_format,
+                "answer_sha256": answer_sha256,
                 "remote_turn_id": remote_turn_id,
+                "attempt_id": attempt_id,
+                "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 "submitted_at": submitted_at,
                 "generation_observed_at": generation_observed_at,
                 "response_completed_at": response_completed_at,
@@ -778,6 +1019,9 @@ def main() -> int:
             dedupe_key=f"gpt-exchange:{capture_fingerprint}",
             occurred_at=saved_at,
         )
+
+        if attempt:
+            complete_attempt(repo, thread_id, attempt_id, turn_file)
 
         if verification or decision_trail:
             verdict_path = record_codex_verdict(

@@ -5,6 +5,12 @@ description: Build a compact, immutable GPT Pro evidence bundle from repository 
 
 # Bundle Algorithm Context
 
+## Host runtime
+
+Invoke every helper with one explicit Python 3.10+ interpreter appropriate to
+the host (`python` on Windows or `python3` on POSIX). Keep that interpreter
+consistent throughout one Bridge round instead of relying on script shebangs.
+
 Build the smallest evidence package that can support the decision. Do not dump the repository.
 
 Before writing bridge state, read the canonical protocol at [../gpt-pro-question-window/references/bridge_protocol.md](../gpt-pro-question-window/references/bridge_protocol.md). Before validating a generated package, read [references/bundle_schema.md](references/bundle_schema.md).

@@ -73,6 +73,27 @@ sequenceDiagram
 
 The goal is to make the loop reusable, auditable, and implementable. Codex remains the source of truth; GPT Pro remains an external reviewer.
 
+### Reliability and unattended operation
+
+The bridge treats browser state as a protocol rather than a best-effort UI macro:
+
+| Capability | Guarantee |
+| --- | --- |
+| Tab ownership and parallel work | Host-global profile, Project, and conversation claims bind one Bridge Thread to one owned tab; unrelated conversations may proceed in parallel without closing pages |
+| New conversations | A Project/home bootstrap is promoted to the exact stable conversation URL immediately after the first accepted Send |
+| No duplicate Send | Durable attempts record preflight, `send-started`, accepted Send, and the pinned remote turn; an unknown outcome is recoverable but never resendable |
+| Unattended recovery | Wait plans and continuation receipts preserve the same attempt across runtime yields instead of treating a local timeout as task completion |
+| Upload safety | `devtools-upload/v1` permits one attachment-control click, one fresh menu snapshot, and direct `upload_file`; unknown chooser state fails closed |
+| Model controls | `model-controls/v1` separates model selection from thinking intensity, supports dynamic labels such as `latest`, and bounds reads and adjustments |
+| Exact answer capture | The bridge pins the remote turn and preserves copied Markdown structure; plain text is explicitly marked as degraded capture |
+| Project switching | Explicit rebind archives the previous Sources manifest and requires a fresh complete inventory before mutations |
+| Deterministic delegation | `executor_handoff/v2` freezes question, evidence policy, target, authorization, model controls, expected outputs, and digests before browser work |
+
+The optional `bridge_executor` agent keeps packaging, staging, upload, waiting, and
+raw capture out of the main agent's context while leaving evidence selection and
+the final verdict with the main agent. A portable template is provided at
+[`agents/bridge-executor.toml.example`](codex-pro-bridge-skills/agents/bridge-executor.toml.example).
+
 ## How it works
 
 Each task uses one bridge thread so the evidence, external review, local verdict, implementation, and later follow-ups remain connected.
@@ -208,6 +229,24 @@ Repository-local installation:
 ```bash
 ./codex-pro-bridge-skills/install.sh --repo /path/to/repo
 ```
+
+Windows PowerShell supports both installation scopes:
+
+```powershell
+.\codex-pro-bridge-skills\install.ps1 -Global
+.\codex-pro-bridge-skills\install.ps1 -Repo C:\path\to\repo
+```
+
+For native Windows execution or WSL Codex with Windows MCP/Chrome, configure the
+optional digest-verified staging topology in
+[`HOST_TOPOLOGIES.md`](codex-pro-bridge-skills/docs/HOST_TOPOLOGIES.md). The
+checked-in examples contain environment-variable names only; keep concrete paths
+in private host configuration.
+
+To use delegated unattended execution, copy the optional agent template to
+`$CODEX_HOME/agents/bridge-executor.toml` (default `~/.codex/agents/`) and review
+its model and service-tier settings first. The installers intentionally do not
+overwrite agent configuration.
 
 Restart Codex or open a new task if an existing task does not discover the updated skills.
 

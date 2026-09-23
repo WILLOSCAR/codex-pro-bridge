@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
-import fcntl
 import hashlib
 import json
 import os
@@ -18,6 +17,11 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Sequence
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 SCHEMA_VERSION = 1
@@ -139,7 +143,9 @@ def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        # Frozen artifact hashes are computed from UTF-8 text bytes. Windows
+        # newline translation would otherwise change those bytes after hashing.
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
@@ -153,39 +159,95 @@ def atomic_write_text(path: Path, text: str) -> None:
 @contextlib.contextmanager
 def file_lock(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    if os.name == "nt":
+        with path.open("a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        with path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-# --- Host-local browser lease -------------------------------------------------
-# Serializes browser-mutating windows (attach/upload/preflight/send and any
-# later full-answer browser fallback) so that several parallel Review Probes
-# never drive the one signed-in browser at once. Release it during generation
-# and reacquire it for fallback capture. This is an ADVISORY, REPOSITORY-LOCAL
-# lease at the same trust level as file_lock. Chrome is host-local, so separate
-# worktrees/repositories still need one declared dispatcher. This is NOT a
-# distributed lock. An expired lease may be taken over.
+# --- Host-local browser ownership ---------------------------------------------
+# The registry is shared across repositories and worktrees on this WSL host.
+# Claims are scoped by Chrome profile and, when available, Project/conversation,
+# so different conversations may mutate different dedicated tabs concurrently.
+# A Project claim blocks conversation claims in that Project while shared
+# Project state is being changed. Conversation bindings persist after a live
+# claim is released: one Bridge Thread can never silently move to another chat.
 DEFAULT_BROWSER_LEASE_TTL_SECONDS = 1800
+DEFAULT_BROWSER_PROFILE = "chrome-stable-default"
+BROWSER_PROFILE_ALIASES = {
+    "chrome-stable-default": DEFAULT_BROWSER_PROFILE,
+    "chrome-default": DEFAULT_BROWSER_PROFILE,
+    "chrome-devtools": DEFAULT_BROWSER_PROFILE,
+}
+TAB_OWNER_STORAGE_KEY = "codex-pro-bridge.tab-owner.v1"
+_BROWSER_STATE_DIR_ENV = "CODEX_PRO_BRIDGE_BROWSER_STATE_DIR"
+_BROWSER_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,240}$")
+_BROWSER_CLAIM_SCOPES = {"auto", "profile", "project", "conversation"}
 
 
-def _browser_lease_path(repo: Path) -> Path:
-    return bridge_root(repo) / "locks" / "browser.lease.json"
+def _browser_state_root() -> Path:
+    configured = os.environ.get(_BROWSER_STATE_DIR_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path.home() / ".codex" / "codex-pro-bridge" / "browser-state"
 
 
-def read_browser_lease(repo: Path) -> Dict[str, Any]:
-    """Return the current lease record, or {} when none is held."""
-    path = _browser_lease_path(repo)
+def _browser_registry_path() -> Path:
+    return _browser_state_root() / "ownership.json"
+
+
+def _empty_browser_registry() -> Dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "bindings": [],
+        "leases": [],
+        "pending_bootstraps": [],
+    }
+
+
+def _read_browser_registry() -> Dict[str, Any]:
+    path = _browser_registry_path()
     if not path.exists():
-        return {}
+        return _empty_browser_registry()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError) as exc:
+        raise BridgeError(f"Cannot read browser ownership registry {path}: {exc}") from exc
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        raise BridgeError(f"Unsupported browser ownership registry: {path}")
+    if not isinstance(data.get("bindings"), list) or not isinstance(data.get("leases"), list):
+        raise BridgeError(f"Malformed browser ownership registry: {path}")
+    # ``pending_bootstraps`` was added without changing schema v1 so existing
+    # registries remain readable. A pending bootstrap is durable browser-tab
+    # identity; unlike a lease, it must never disappear merely because time
+    # elapsed while ChatGPT was generating or the local worker was interrupted.
+    if "pending_bootstraps" not in data:
+        data["pending_bootstraps"] = []
+    if not isinstance(data.get("pending_bootstraps"), list):
+        raise BridgeError(f"Malformed browser ownership registry: {path}")
+    _materialize_legacy_browser_bootstraps(data)
+    return data
+
+
+def _write_browser_registry(registry: Mapping[str, Any]) -> None:
+    path = _browser_registry_path()
+    atomic_write_text(path, json.dumps(registry, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def _lease_is_live(lease: Mapping[str, Any], *, now: dt.datetime) -> bool:
@@ -198,6 +260,302 @@ def _lease_is_live(lease: Mapping[str, Any], *, now: dt.datetime) -> bool:
         return False
 
 
+def _live_browser_leases(registry: Mapping[str, Any], *, now: dt.datetime) -> List[Dict[str, Any]]:
+    return [
+        dict(lease)
+        for lease in registry.get("leases", [])
+        if isinstance(lease, dict) and _lease_is_live(lease, now=now)
+    ]
+
+
+def _validate_browser_identity(value: str, field: str, *, required: bool = False) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        if required:
+            raise BridgeError(f"{field} is required")
+        return ""
+    if not _BROWSER_ID_RE.fullmatch(normalized):
+        raise BridgeError(
+            f"{field} must be 1-240 letters, digits, dots, underscores, or hyphens"
+        )
+    return normalized
+
+
+def normalize_browser_profile(value: str) -> str:
+    profile = _validate_browser_identity(value, "browser profile", required=True)
+    try:
+        return BROWSER_PROFILE_ALIASES[profile]
+    except KeyError as exc:
+        raise BridgeError(f"Unknown browser profile: {profile!r}") from exc
+
+
+def _browser_profiles_match(left: Any, right: Any) -> bool:
+    return normalize_browser_profile(str(left or "")) == normalize_browser_profile(
+        str(right or "")
+    )
+
+
+def _resolve_browser_scope(
+    requested_scope: str,
+    *,
+    conversation_id: str,
+    project_id: str,
+) -> str:
+    scope = (requested_scope or "auto").strip().lower()
+    if scope not in _BROWSER_CLAIM_SCOPES:
+        raise BridgeError(f"Unknown browser claim scope: {requested_scope!r}")
+    if scope == "auto":
+        return "conversation" if conversation_id else "project" if project_id else "profile"
+    if scope == "conversation" and not conversation_id:
+        raise BridgeError("A conversation browser claim requires a conversation id")
+    if scope == "project" and not project_id:
+        raise BridgeError("A Project browser claim requires a remote Project id")
+    return scope
+
+
+def _browser_claims_conflict(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    if not _browser_profiles_match(
+        left.get("browser_profile"), right.get("browser_profile")
+    ):
+        return False
+    left_scope = left.get("scope")
+    right_scope = right.get("scope")
+    if "profile" in {left_scope, right_scope}:
+        return True
+    left_project = str(left.get("expected_remote_project_id", ""))
+    right_project = str(right.get("expected_remote_project_id", ""))
+    if left_project and left_project == right_project and "project" in {left_scope, right_scope}:
+        return True
+    return bool(
+        left_scope == right_scope == "conversation"
+        and left.get("expected_conversation_id") == right.get("expected_conversation_id")
+    )
+
+
+def _same_bootstrap_identity(
+    item: Mapping[str, Any], requested: Mapping[str, Any]
+) -> bool:
+    return bool(
+        item.get("bootstrap", False)
+        and requested.get("bootstrap", False)
+        and _browser_profiles_match(
+            item.get("browser_profile"), requested.get("browser_profile")
+        )
+        and item.get("scope") == requested.get("scope")
+        and item.get("thread_id", "") == requested.get("thread_id", "")
+        and item.get("expected_conversation_id", "")
+        == requested.get("expected_conversation_id", "")
+        and item.get("expected_remote_project_id", "")
+        == requested.get("expected_remote_project_id", "")
+    )
+
+
+def _pending_bootstrap_from_claim(
+    claim: Mapping[str, Any], *, now: dt.datetime
+) -> Dict[str, Any]:
+    created_at = str(claim.get("acquired_at") or now.isoformat(timespec="seconds"))
+    pending = {
+        "browser_profile": normalize_browser_profile(
+            str(claim.get("browser_profile", ""))
+        ),
+        "scope": str(claim.get("scope", "")),
+        "thread_id": str(claim.get("thread_id", "")),
+        "expected_conversation_id": "",
+        "expected_remote_project_id": str(
+            claim.get("expected_remote_project_id", "")
+        ),
+        "bootstrap": True,
+        "tab_owner_token": str(claim.get("tab_owner_token", "")),
+        "storage_key": str(claim.get("storage_key") or TAB_OWNER_STORAGE_KEY),
+        "tab_bound": bool(claim.get("tab_bound", False)),
+        "created_at": created_at,
+        "last_claimed_at": now.isoformat(timespec="seconds"),
+    }
+    if claim.get("tab_bound_at"):
+        pending["tab_bound_at"] = claim["tab_bound_at"]
+    return pending
+
+
+def _materialize_legacy_browser_bootstraps(registry: Dict[str, Any]) -> None:
+    """Normalize retained pre-pending bootstrap leases without writing the registry.
+
+    Every registry mutation filters expired leases. Materializing their durable
+    identity during read ensures an unrelated later mutation cannot discard the
+    only owner-token record before the original Bridge Thread returns.
+    """
+    now = dt.datetime.now().astimezone()
+    for lease in registry.get("leases", []):
+        if (
+            not isinstance(lease, dict)
+            or not lease.get("bootstrap", False)
+            or not lease.get("tab_owner_token")
+        ):
+            continue
+        matches = [
+            pending
+            for pending in registry["pending_bootstraps"]
+            if isinstance(pending, dict)
+            and _same_bootstrap_identity(pending, lease)
+        ]
+        owners = {
+            str(item.get("tab_owner_token", ""))
+            for item in matches + [lease]
+            if str(item.get("tab_owner_token", ""))
+        }
+        if len(owners) != 1:
+            raise BridgeError(
+                "Ambiguous retained bootstrap owners for one browser identity; HOLD"
+            )
+        if not matches:
+            registry["pending_bootstraps"].append(
+                _pending_bootstrap_from_claim(lease, now=now)
+            )
+            continue
+        if len(matches) > 1:
+            raise BridgeError(
+                "Multiple pending bootstraps for one browser identity; HOLD"
+            )
+        pending = matches[0]
+        if lease.get("tab_bound", False):
+            pending["tab_bound"] = True
+            if lease.get("tab_bound_at"):
+                pending["tab_bound_at"] = lease["tab_bound_at"]
+
+
+def read_browser_lease(repo: Path) -> Dict[str, Any]:
+    """Return the live host-local claim registry.
+
+    ``repo`` remains in the signature for compatibility; ownership is no longer
+    repository-local.
+    """
+    del repo
+    path = _browser_registry_path()
+    lock_path = path.with_name(f".{path.name}.lock")
+    with file_lock(lock_path):
+        registry = _read_browser_registry()
+        now = dt.datetime.now().astimezone()
+        return {
+            "schema_version": 1,
+            "registry_path": str(path),
+            "bindings": [dict(item) for item in registry["bindings"] if isinstance(item, dict)],
+            "leases": _live_browser_leases(registry, now=now),
+            "pending_bootstraps": [
+                dict(item)
+                for item in registry["pending_bootstraps"]
+                if isinstance(item, dict)
+            ],
+        }
+
+
+def inspect_browser_tab_owner(
+    repo: Path,
+    *,
+    browser_profile: str,
+    tab_owner_token: str,
+) -> Dict[str, Any]:
+    """Classify an observed tab owner without changing browser or registry state."""
+    del repo
+    profile = normalize_browser_profile(browser_profile)
+    owner_token = _validate_browser_identity(
+        tab_owner_token, "tab owner token", required=True
+    )
+    path = _browser_registry_path()
+    lock_path = path.with_name(f".{path.name}.lock")
+    with file_lock(lock_path):
+        registry = _read_browser_registry()
+        now = dt.datetime.now().astimezone()
+        live_claims = [
+            dict(item)
+            for item in _live_browser_leases(registry, now=now)
+            if _browser_profiles_match(item.get("browser_profile"), profile)
+            and item.get("tab_owner_token") == owner_token
+        ]
+        bindings = [
+            dict(item)
+            for item in registry["bindings"]
+            if isinstance(item, dict)
+            and _browser_profiles_match(item.get("browser_profile"), profile)
+            and item.get("tab_owner_token") == owner_token
+        ]
+        pending_bootstraps = [
+            dict(item)
+            for item in registry["pending_bootstraps"]
+            if isinstance(item, dict)
+            and _browser_profiles_match(item.get("browser_profile"), profile)
+            and item.get("tab_owner_token") == owner_token
+        ]
+    status = (
+        "live-claim"
+        if live_claims
+        else "durable-binding"
+        if bindings
+        else "pending-bootstrap"
+        if pending_bootstraps
+        else "stale"
+    )
+    return {
+        "status": status,
+        "browser_profile": profile,
+        "tab_owner_token": owner_token,
+        "live_claims": live_claims,
+        "bindings": bindings,
+        "pending_bootstraps": pending_bootstraps,
+    }
+
+
+def mark_browser_tab_bound(
+    repo: Path,
+    *,
+    token: str,
+    observed_tab_owner_token: str,
+) -> Dict[str, Any]:
+    """Persist bootstrap tab binding only after its owner token was observed."""
+    del repo
+    token = (token or "").strip()
+    owner_token = (observed_tab_owner_token or "").strip()
+    if not token or not owner_token:
+        raise BridgeError("Live claim and observed tab owner tokens are required")
+    path = _browser_registry_path()
+    lock_path = path.with_name(f".{path.name}.lock")
+    with file_lock(lock_path):
+        registry = _read_browser_registry()
+        now = dt.datetime.now().astimezone()
+        live = _live_browser_leases(registry, now=now)
+        claim = next((item for item in live if item.get("token") == token), None)
+        if claim is None:
+            raise BridgeError("Browser claim token is not a live holder")
+        if not claim.get("bootstrap", False):
+            raise BridgeError("Only a bootstrap claim records tab_bound")
+        if claim.get("tab_owner_token") != owner_token:
+            raise BridgeError("Observed tab owner token does not match the bootstrap claim")
+        if claim.get("tab_bound", False):
+            return dict(claim)
+        claim["tab_bound"] = True
+        claim["tab_bound_at"] = now.isoformat(timespec="seconds")
+        matching_pending = next(
+            (
+                item
+                for item in registry["pending_bootstraps"]
+                if isinstance(item, dict)
+                and _same_bootstrap_identity(item, claim)
+                and item.get("tab_owner_token") == owner_token
+            ),
+            None,
+        )
+        if matching_pending is None:
+            matching_pending = _pending_bootstrap_from_claim(claim, now=now)
+            registry["pending_bootstraps"].append(matching_pending)
+        matching_pending["tab_bound"] = True
+        matching_pending["tab_bound_at"] = claim["tab_bound_at"]
+        matching_pending["last_claimed_at"] = claim["tab_bound_at"]
+        registry["leases"] = [
+            claim if item.get("token") == token else item for item in live
+        ]
+        registry["updated_at"] = claim["tab_bound_at"]
+        _write_browser_registry(registry)
+        return dict(claim)
+
+
 def acquire_browser_lease(
     repo: Path,
     *,
@@ -205,70 +563,405 @@ def acquire_browser_lease(
     thread_id: str = "",
     expected_conversation_id: str = "",
     expected_remote_project_id: str = "",
+    browser_profile: str = DEFAULT_BROWSER_PROFILE,
+    scope: str = "auto",
+    bootstrap: bool = False,
     ttl_seconds: int = DEFAULT_BROWSER_LEASE_TTL_SECONDS,
 ) -> Dict[str, Any]:
-    """Take the repository-local browser lease, or raise if a live one is held.
+    """Acquire one host-local, profile-aware browser claim.
 
-    A lease whose ``expires_at`` is in the past is treated as free and may be
-    taken over; the previous holder is reported in the raised error otherwise.
+    Different conversation claims may coexist. The same conversation cannot be
+    claimed by another thread, and a Project/profile claim excludes narrower
+    claims in its scope.
     """
-    repo = repo.resolve()
-    if not holder.strip():
-        raise BridgeError("A browser lease requires a non-empty --holder")
+    del repo
+    holder = (holder or "").strip()
+    if not holder:
+        raise BridgeError("A browser claim requires a non-empty --holder")
     if ttl_seconds <= 0:
-        raise BridgeError("Browser lease ttl-seconds must be positive")
-    lease_path = _browser_lease_path(repo)
-    lock_path = lease_path.with_name(f".{lease_path.name}.lock")
+        raise BridgeError("Browser claim ttl-seconds must be positive")
+    profile = normalize_browser_profile(browser_profile)
+    conversation_id = _validate_browser_identity(
+        expected_conversation_id, "conversation id"
+    )
+    project_id = _validate_browser_identity(expected_remote_project_id, "remote Project id")
+    normalized_thread = validate_id(thread_id, "bridge thread id") if thread_id else ""
+    resolved_scope = _resolve_browser_scope(
+        scope, conversation_id=conversation_id, project_id=project_id
+    )
+    if resolved_scope == "conversation" and not normalized_thread:
+        raise BridgeError("A conversation browser claim requires --bridge-thread-id")
+    if bootstrap:
+        if conversation_id or resolved_scope == "conversation":
+            raise BridgeError("A bootstrap claim cannot already have a conversation id")
+        if not normalized_thread:
+            raise BridgeError("A bootstrap claim requires --bridge-thread-id")
+        if resolved_scope not in {"project", "profile"}:
+            raise BridgeError("A bootstrap claim must use Project or profile scope")
+
+    requested = {
+        "browser_profile": profile,
+        "scope": resolved_scope,
+        "thread_id": normalized_thread,
+        "expected_conversation_id": conversation_id,
+        "expected_remote_project_id": project_id,
+        "bootstrap": bool(bootstrap),
+    }
+    registry_path = _browser_registry_path()
+    lock_path = registry_path.with_name(f".{registry_path.name}.lock")
     with file_lock(lock_path):
+        registry = _read_browser_registry()
         now = dt.datetime.now().astimezone()
-        current = read_browser_lease(repo)
-        if _lease_is_live(current, now=now) and current.get("holder") != holder:
-            raise BridgeError(
-                "Browser lease is held by "
-                f"{current.get('holder', '<unknown>')!r} for thread "
-                f"{current.get('thread_id', '<none>')!r} until "
-                f"{current.get('expires_at', '<unknown>')}"
+        live = _live_browser_leases(registry, now=now)
+
+        if bootstrap:
+            for binding in registry["bindings"]:
+                if not isinstance(binding, dict):
+                    continue
+                if (
+                    _browser_profiles_match(binding.get("browser_profile"), profile)
+                    and binding.get("thread_id") == normalized_thread
+                ):
+                    raise BridgeError(
+                        f"Bridge Thread {normalized_thread!r} is already bound to conversation "
+                        f"{binding.get('expected_conversation_id')!r}"
+                    )
+
+        pending_bootstrap = None
+        for pending in registry["pending_bootstraps"]:
+            if not isinstance(pending, dict):
+                continue
+            if (
+                _browser_profiles_match(pending.get("browser_profile"), profile)
+                and pending.get("thread_id") == normalized_thread
+            ):
+                if bootstrap:
+                    if not _same_bootstrap_identity(pending, requested):
+                        raise BridgeError(
+                            f"Bridge Thread {normalized_thread!r} already has a pending "
+                            "bootstrap for a different browser scope"
+                        )
+                    pending_bootstrap = pending
+                elif _browser_claims_conflict(pending, requested):
+                    raise BridgeError(
+                        f"Bridge Thread {normalized_thread!r} has a pending bootstrap; "
+                        "explicit release or promotion is required"
+                    )
+            elif _browser_claims_conflict(pending, requested):
+                raise BridgeError(
+                    "Browser claim conflicts with pending bootstrap for holder thread "
+                    f"{pending.get('thread_id', '<unknown>')!r}, scope "
+                    f"{pending.get('scope', '<unknown>')!r}; explicit release or "
+                    "promotion is required"
+                )
+
+        for current in live:
+            same_claim = all(
+                _browser_profiles_match(current.get(key), value)
+                if key == "browser_profile"
+                else current.get(key, False) == value
+                if key == "bootstrap"
+                else current.get(key, "") == value
+                for key, value in requested.items()
             )
-        token = uuid.uuid4().hex
+            if same_claim and current.get("holder") == holder:
+                if bootstrap and pending_bootstrap is None:
+                    pending_bootstrap = _pending_bootstrap_from_claim(current, now=now)
+                    registry["pending_bootstraps"].append(pending_bootstrap)
+                if pending_bootstrap is not None:
+                    current["tab_owner_token"] = pending_bootstrap["tab_owner_token"]
+                    current["tab_bound"] = bool(pending_bootstrap.get("tab_bound", False))
+                    if pending_bootstrap.get("tab_bound_at"):
+                        current["tab_bound_at"] = pending_bootstrap["tab_bound_at"]
+                    pending_bootstrap["last_claimed_at"] = now.isoformat(timespec="seconds")
+                current["expires_at"] = (
+                    now + dt.timedelta(seconds=ttl_seconds)
+                ).isoformat(timespec="seconds")
+                registry["leases"] = [
+                    current if item.get("token") == current.get("token") else item
+                    for item in live
+                ]
+                registry["updated_at"] = now.isoformat(timespec="seconds")
+                _write_browser_registry(registry)
+                return current
+            if _browser_claims_conflict(current, requested):
+                raise BridgeError(
+                    "Browser claim conflicts with holder "
+                    f"{current.get('holder', '<unknown>')!r}, scope "
+                    f"{current.get('scope', '<unknown>')!r}, conversation "
+                    f"{current.get('expected_conversation_id', '<none>')!r}, until "
+                    f"{current.get('expires_at', '<unknown>')}"
+                )
+
+        tab_owner_token = (
+            str(pending_bootstrap.get("tab_owner_token", ""))
+            if pending_bootstrap is not None
+            else uuid.uuid4().hex
+            if bootstrap
+            else ""
+        )
+        compatible_tab_owner_tokens: List[str] = []
+        if resolved_scope == "conversation":
+            matching_bindings = []
+            for binding in registry["bindings"]:
+                if not isinstance(binding, dict):
+                    continue
+                if (
+                    _browser_profiles_match(binding.get("browser_profile"), profile)
+                    and binding.get("expected_conversation_id") == conversation_id
+                ):
+                    if binding.get("thread_id") != normalized_thread:
+                        raise BridgeError(
+                            f"Conversation {conversation_id!r} belongs to Bridge Thread "
+                            f"{binding.get('thread_id')!r}, not {normalized_thread!r}"
+                        )
+                    if binding.get("expected_remote_project_id", "") != project_id:
+                        raise BridgeError("Conversation binding has a different ChatGPT Project id")
+                    matching_bindings.append(binding)
+                if (
+                    _browser_profiles_match(binding.get("browser_profile"), profile)
+                    and binding.get("thread_id") == normalized_thread
+                    and binding.get("expected_conversation_id") != conversation_id
+                ):
+                    raise BridgeError(
+                        f"Bridge Thread {normalized_thread!r} is already bound to conversation "
+                        f"{binding.get('expected_conversation_id')!r}"
+                    )
+            matching_binding = (
+                max(
+                    matching_bindings,
+                    key=lambda item: str(
+                        item.get("last_claimed_at") or item.get("created_at") or ""
+                    ),
+                )
+                if matching_bindings
+                else None
+            )
+            if matching_binding:
+                tab_owner_token = str(matching_binding.get("tab_owner_token", ""))
+                compatible_tab_owner_tokens = sorted(
+                    {
+                        str(item.get("tab_owner_token", ""))
+                        for item in matching_bindings
+                        if str(item.get("tab_owner_token", ""))
+                    }
+                )
+                matching_binding["last_claimed_at"] = now.isoformat(timespec="seconds")
+            else:
+                tab_owner_token = uuid.uuid4().hex
+                compatible_tab_owner_tokens = [tab_owner_token]
+                registry["bindings"].append(
+                    {
+                        "browser_profile": profile,
+                        "thread_id": normalized_thread,
+                        "expected_conversation_id": conversation_id,
+                        "expected_remote_project_id": project_id,
+                        "tab_owner_token": tab_owner_token,
+                        "storage_key": TAB_OWNER_STORAGE_KEY,
+                        "created_at": now.isoformat(timespec="seconds"),
+                        "last_claimed_at": now.isoformat(timespec="seconds"),
+                    }
+                )
+
         acquired = now.isoformat(timespec="seconds")
-        expires = (now + dt.timedelta(seconds=ttl_seconds)).isoformat(timespec="seconds")
         lease = {
-            "token": token,
+            "token": uuid.uuid4().hex,
             "holder": holder,
-            "thread_id": thread_id,
-            "expected_conversation_id": expected_conversation_id,
-            "expected_remote_project_id": expected_remote_project_id,
+            **requested,
+            "tab_owner_token": tab_owner_token,
+            "storage_key": TAB_OWNER_STORAGE_KEY if tab_owner_token else "",
             "acquired_at": acquired,
-            "expires_at": expires,
+            "expires_at": (
+                now + dt.timedelta(seconds=ttl_seconds)
+            ).isoformat(timespec="seconds"),
         }
-        atomic_write_text(lease_path, json.dumps(lease, ensure_ascii=False, sort_keys=True) + "\n")
+        if bootstrap:
+            lease["tab_bound"] = bool(
+                pending_bootstrap.get("tab_bound", False)
+                if pending_bootstrap is not None
+                else False
+            )
+            if pending_bootstrap and pending_bootstrap.get("tab_bound_at"):
+                lease["tab_bound_at"] = pending_bootstrap["tab_bound_at"]
+            if pending_bootstrap is None:
+                pending_bootstrap = _pending_bootstrap_from_claim(lease, now=now)
+                registry["pending_bootstraps"].append(pending_bootstrap)
+            else:
+                pending_bootstrap["last_claimed_at"] = acquired
+        elif compatible_tab_owner_tokens:
+            lease["compatible_tab_owner_tokens"] = compatible_tab_owner_tokens
+        registry["leases"] = live + [lease]
+        registry["updated_at"] = acquired
+        _write_browser_registry(registry)
         return lease
 
 
-def release_browser_lease(repo: Path, *, token: str) -> bool:
-    """Release the lease when ``token`` matches. Returns True when cleared."""
-    repo = repo.resolve()
-    lease_path = _browser_lease_path(repo)
-    lock_path = lease_path.with_name(f".{lease_path.name}.lock")
+def promote_browser_bootstrap(
+    repo: Path,
+    *,
+    token: str,
+    thread_id: str,
+    conversation_id: str,
+    expected_remote_project_id: str = "",
+    browser_profile: str = DEFAULT_BROWSER_PROFILE,
+    observed_tab_owner_token: str,
+) -> Dict[str, Any]:
+    """Atomically promote a first-Send claim to a durable conversation binding."""
+    del repo
+    token = (token or "").strip()
+    if not token:
+        raise BridgeError("Browser claim token is required")
+    normalized_thread = validate_id(thread_id, "bridge thread id")
+    normalized_conversation = _validate_browser_identity(
+        conversation_id, "conversation id", required=True
+    )
+    normalized_project = _validate_browser_identity(
+        expected_remote_project_id, "remote Project id"
+    )
+    profile = normalize_browser_profile(browser_profile)
+    owner_token = (observed_tab_owner_token or "").strip()
+    if not owner_token:
+        raise BridgeError("Observed tab owner token is required")
+
+    registry_path = _browser_registry_path()
+    lock_path = registry_path.with_name(f".{registry_path.name}.lock")
     with file_lock(lock_path):
-        current = read_browser_lease(repo)
-        if not current:
-            return False
-        if current.get("token") != token:
-            raise BridgeError("Browser lease token does not match the current holder")
-        atomic_write_text(lease_path, json.dumps({}, ensure_ascii=False) + "\n")
+        registry = _read_browser_registry()
+        now = dt.datetime.now().astimezone()
+        live = _live_browser_leases(registry, now=now)
+        claim = next((item for item in live if item.get("token") == token), None)
+        if claim is None:
+            raise BridgeError("Browser claim token is not a live holder")
+        if claim.get("thread_id") != normalized_thread:
+            raise BridgeError("Bootstrap claim belongs to a different Bridge Thread")
+        if not _browser_profiles_match(claim.get("browser_profile"), profile):
+            raise BridgeError("Bootstrap claim belongs to a different browser profile")
+        if claim.get("expected_remote_project_id", "") != normalized_project:
+            raise BridgeError("Bootstrap claim belongs to a different ChatGPT Project")
+        if claim.get("tab_owner_token", "") != owner_token:
+            raise BridgeError("The post-Send tab owner token does not match the bootstrap claim")
+
+        if not claim.get("bootstrap", False):
+            if (
+                claim.get("scope") == "conversation"
+                and claim.get("expected_conversation_id") == normalized_conversation
+            ):
+                return dict(claim)
+            raise BridgeError("Browser claim is not an active conversation bootstrap")
+        expected_scope = "project" if normalized_project else "profile"
+        if claim.get("scope") != expected_scope:
+            raise BridgeError(f"Bootstrap claim must have {expected_scope} scope")
+
+        matching_binding = None
+        for binding in registry["bindings"]:
+            if not isinstance(binding, dict):
+                continue
+            same_profile = _browser_profiles_match(binding.get("browser_profile"), profile)
+            if same_profile and binding.get("thread_id") == normalized_thread:
+                if binding.get("expected_conversation_id") != normalized_conversation:
+                    raise BridgeError(
+                        f"Bridge Thread {normalized_thread!r} is already bound to conversation "
+                        f"{binding.get('expected_conversation_id')!r}"
+                    )
+                matching_binding = binding
+            if same_profile and binding.get("expected_conversation_id") == normalized_conversation:
+                if binding.get("thread_id") != normalized_thread:
+                    raise BridgeError(
+                        f"Conversation {normalized_conversation!r} belongs to Bridge Thread "
+                        f"{binding.get('thread_id')!r}"
+                    )
+                matching_binding = binding
+
+        promoted_at = now.isoformat(timespec="seconds")
+        if matching_binding is None:
+            matching_binding = {
+                "browser_profile": profile,
+                "thread_id": normalized_thread,
+                "expected_conversation_id": normalized_conversation,
+                "expected_remote_project_id": normalized_project,
+                "tab_owner_token": owner_token,
+                "storage_key": TAB_OWNER_STORAGE_KEY,
+                "created_at": promoted_at,
+                "last_claimed_at": promoted_at,
+            }
+            registry["bindings"].append(matching_binding)
+        elif (
+            matching_binding.get("expected_remote_project_id", "") != normalized_project
+            or matching_binding.get("tab_owner_token", "") != owner_token
+        ):
+            raise BridgeError("Existing conversation binding does not match the bootstrap claim")
+
+        promoted = {
+            **claim,
+            "scope": "conversation",
+            "expected_conversation_id": normalized_conversation,
+            "bootstrap": False,
+            "promoted_at": promoted_at,
+        }
+        promoted.pop("tab_bound", None)
+        registry["pending_bootstraps"] = [
+            item
+            for item in registry["pending_bootstraps"]
+            if not (
+                isinstance(item, dict)
+                and _same_bootstrap_identity(item, claim)
+                and item.get("tab_owner_token") == owner_token
+            )
+        ]
+        registry["leases"] = [
+            promoted if item.get("token") == token else item for item in live
+        ]
+        registry["updated_at"] = promoted_at
+        _write_browser_registry(registry)
+        return dict(promoted)
+
+
+def release_browser_lease(repo: Path, *, token: str) -> bool:
+    """Release one live claim by exact token; persistent chat binding remains."""
+    del repo
+    token = (token or "").strip()
+    if not token:
+        raise BridgeError("Browser claim token is required")
+    registry_path = _browser_registry_path()
+    lock_path = registry_path.with_name(f".{registry_path.name}.lock")
+    with file_lock(lock_path):
+        registry = _read_browser_registry()
+        now = dt.datetime.now().astimezone()
+        live = _live_browser_leases(registry, now=now)
+        released_claim = next((lease for lease in live if lease.get("token") == token), None)
+        kept = [lease for lease in live if lease.get("token") != token]
+        if len(kept) == len(live):
+            raise BridgeError("Browser claim token is not a live holder")
+        if released_claim and released_claim.get("bootstrap", False):
+            registry["pending_bootstraps"] = [
+                item
+                for item in registry["pending_bootstraps"]
+                if not (
+                    isinstance(item, dict)
+                    and _same_bootstrap_identity(item, released_claim)
+                    and item.get("tab_owner_token")
+                    == released_claim.get("tab_owner_token")
+                )
+            ]
+        registry["leases"] = kept
+        registry["updated_at"] = now.isoformat(timespec="seconds")
+        _write_browser_registry(registry)
         return True
 
 
 def assert_browser_lease_held(repo: Path, *, token: str) -> Dict[str, Any]:
-    """Return the lease when ``token`` still holds a live lease, else raise."""
-    current = read_browser_lease(repo)
-    now = dt.datetime.now().astimezone()
-    if not current or current.get("token") != token:
-        raise BridgeError("Browser lease token is not the current holder")
-    if not _lease_is_live(current, now=now):
-        raise BridgeError("Browser lease has expired; re-acquire before submitting")
-    return current
+    """Return the live host-local claim identified by ``token``."""
+    del repo
+    token = (token or "").strip()
+    registry_path = _browser_registry_path()
+    lock_path = registry_path.with_name(f".{registry_path.name}.lock")
+    with file_lock(lock_path):
+        registry = _read_browser_registry()
+        now = dt.datetime.now().astimezone()
+        for lease in _live_browser_leases(registry, now=now):
+            if lease.get("token") == token:
+                return lease
+    raise BridgeError("Browser claim token is not a live holder")
 
 
 def write_bound_metadata(
